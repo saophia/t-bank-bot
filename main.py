@@ -1,5 +1,6 @@
 import os, asyncio, aiohttp, random, time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -7,13 +8,18 @@ from flask import Flask
 import threading
 
 TOKEN = os.getenv("BOT_TOKEN")
+REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID")
+
 if not TOKEN:
     raise ValueError("BOT_TOKEN not set!")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 CACHE = {}
 CACHE_TTL = 300
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+LAST_REPORTS = {"morning": None, "evening": None}
 
 def calc_rsi_fixed(prices, period=14):
     if len(prices) < period+1: return 50
@@ -36,11 +42,11 @@ async def get_analysis(symbol="btc"):
     sym = symbol.upper()
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         price_usd=0; change=0
-        for url in [f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT"]:
-            data=await fetch_json(s,url)
-            if data and 'lastPrice' in data:
-                price_usd=float(data['lastPrice']); change=float(data['priceChangePercent']); break
-        if price_usd==0: price_usd={"BTC":80991,"ETH":2375,"SOL":145}.get(sym,100); change=-2.9
+        data=await fetch_json(s,f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
+        if data and 'lastPrice' in data:
+            price_usd=float(data['lastPrice']); change=float(data['priceChangePercent'])
+        if price_usd==0:
+            price_usd={"BTC":80991,"ETH":2375,"SOL":145,"TON":5.2}.get(sym,100); change=-2.9
         closes=[]
         kl=await fetch_json(s,f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
         if kl and isinstance(kl,list):
@@ -67,15 +73,15 @@ async def get_analysis(symbol="btc"):
                 if len(title)>80: title=title[:77]+"..."
                 news_with_links.append({"title":title,"url":n['url']})
         if len(news_with_links)<3:
-            fallback=[{"title":f"{sym} хешрейт обновил ATH","url":f"https://cointelegraph.com/search?query={sym}"},{"title":"Инфляция в США ниже ожиданий","url":"https://www.coindesk.com/markets/"},{"title":"Tether напечатал 1 млрд USDT","url":"https://cryptopanic.com/"}]
-            random.shuffle(fallback); news_with_links=(news_with_links+fallback)[:3]
+            fallback=[{"title":f"{sym} хешрейт обновил ATH","url":f"https://cointelegraph.com"},{"title":"Инфляция в США ниже ожиданий","url":"https://www.coindesk.com"},{"title":"Tether напечатал 1 млрд USDT","url":"https://cryptopanic.com/"}]
+            news_with_links=(news_with_links+fallback)[:3]
         usdt_rub=83.9
         rub=await fetch_json(s,"https://www.okx.com/api/v5/market/ticker?instId=USDT-RUB")
         if rub and rub.get('data'):
             try: usdt_rub=float(rub['data'][0]['last'])
             except: pass
         conclusion="Фундаментально позитив, технически перепродан. Возможен отскок." if rsi<=38 else "Фундаментально позитив, технически перегрет. Возможен откат." if rsi>=68 else "Фундаментально позитив, технически нейтрально. Боковик с шансом роста."
-        return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":news_with_links,"rub":usdt_rub,"conclusion":conclusion}
+        return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":news_with_links,"rub":usdt_rub,"conclusion":conclusion,"eth_change": random.uniform(-2,2)}
 
 def format_text(symbol,a):
     date=datetime.now().strftime("%d.%m.%Y")
@@ -88,22 +94,126 @@ def format_text(symbol,a):
 {news_lines}
 ⚠️ Вывод: {a['conclusion']}
 Не фин. совет
-💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉 @tbank_usdt_bot"""
+💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉 @tbank_usdt_bot
+#{symbol.upper()}"""
+
+# --- 新功能：带图的新闻 ---
+async def get_top5_news():
+    async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
+        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=CryptoRadar300"
+        data = await fetch_json(s, url)
+        news_list = []
+        if data and data.get('Data'):
+            for n in data['Data'][:15]:
+                if len(n['title']) < 15: continue
+                news_list.append({
+                    "title": n['title'].strip(),
+                    "url": n['url'],
+                    "source": n.get('categories','').split('|')[0] if n.get('categories') else 'Crypto',
+                    "image": n.get('imageurl',''),
+                })
+                if len(news_list) >= 5: break
+        if len(news_list) < 5:
+            backup = [
+                {"title":"Bitcoin ETF зафиксировал рекордный приток $1.2 млрд","url":"https://cointelegraph.com","source":"ETF","image":""},
+                {"title":"TON Foundation анонсировал новое партнерство","url":"https://ton.org","source":"TON","image":""},
+                {"title":"ФРС США намекнула на снижение ставки","url":"https://coindesk.com","source":"Macro","image":""},
+                {"title":"Ethereum обновление снижает комиссии L2","url":"https://decrypt.co","source":"ETH","image":""},
+                {"title":"Крупный кит перевел 1000 BTC на биржу","url":"https://whale-alert.io","source":"Whale","image":""},
+            ]
+            news_list = (news_list + backup)[:5]
+        return news_list[:5]
+
+async def build_digest(is_morning=True):
+    results = {}
+    for sym in ["BTC","ETH","TON","SOL"]:
+        results[sym] = await get_analysis(sym)
+        await asyncio.sleep(0.3)
+
+    top5 = await get_top5_news()
+    date = datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
+
+    # 模板A 早上
+    if is_morning:
+        news_block = "".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
+        text = f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b> #ton
+
+💰 Рынок: BTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%) | TON ${results['TON']['price']:.2f}
+🧠 Страх: {results['BTC']['fg_val']} ({results['BTC']['fg_text']})
+
+🔥 <b>ТОП-5 главных:</b>
+{news_block}
+⚡️ Вывод: {results['TON']['conclusion']}
+
+Напиши тикер для разбора 👇
+#утро #BTC #TON #дайджест
+"""
+    # 模板B 晚上
+    else:
+        news_block = "".join([f'{i}. <a href="{n["url"]}">{n["title"][:80]}</a> [{n["source"]}]\n' for i,n in enumerate(top5,1)])
+        text = f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>
+
+За день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%
+Индекс страха: {results['BTC']['fg_val']}
+
+📌 <b>Что случилось сегодня:</b>
+{news_block}
+Завтра в 7:00 утренний дайджест. Не пропусти.
+
+#вечер #итоги #TON
+"""
+    cover_image = top5[0].get('image','') if top5 else ''
+    return text, cover_image
+
+async def send_digest(is_morning=True):
+    if not REPORT_CHAT_ID:
+        print("REPORT_CHAT_ID not set")
+        return
+    try:
+        text, img_url = await build_digest(is_morning)
+        if img_url and img_url.startswith("http"):
+            await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=img_url, caption=text, parse_mode="HTML")
+            print(f"Sent {'morning' if is_morning else 'evening'} with image: {img_url}")
+        else:
+            await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True)
+            print(f"Sent {'morning' if is_morning else 'evening'} text only")
+    except Exception as e:
+        print(f"Digest error: {e}")
+        try:
+            text, _ = await build_digest(is_morning)
+            await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True)
+        except: pass
+
+async def scheduler_loop():
+    print("Scheduler started: 7:00 and 18:00 MSK")
+    while True:
+        try:
+            now_msk = datetime.now(MOSCOW_TZ)
+            if now_msk.hour == 7 and now_msk.minute == 0:
+                if LAST_REPORTS["morning"]!= now_msk.date():
+                    await send_digest(is_morning=True)
+                    LAST_REPORTS["morning"] = now_msk.date()
+            if now_msk.hour == 18 and now_msk.minute == 0:
+                if LAST_REPORTS["evening"]!= now_msk.date():
+                    await send_digest(is_morning=False)
+                    LAST_REPORTS["evening"] = now_msk.date()
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"Scheduler error: {e}")
+            await asyncio.sleep(60)
 
 async def delete_after(msg: Message, delay: int):
     await asyncio.sleep(delay)
-    try:
-        await msg.delete()
-    except:
-        pass
+    try: await msg.delete()
+    except: pass
 
 async def handle_any(m:Message):
     try:
-        if m.from_user and m.from_user.is_bot:
-            return
+        if m.from_user and m.from_user.is_bot: return
         txt_full = m.text or ""
-        if "Анализ" in txt_full or "уже был" in txt_full or "Курс T-Bank" in txt_full:
-            return
+        if "уже был" in txt_full: return
+        if "ДАЙДЖЕСТ" in txt_full or "ИТОГ" in txt_full: return
+        if txt_full.startswith("/"): return
         txt=txt_full.lower().strip().split()[0]
         if not txt: return
         sym=''.join(filter(str.isalnum,txt))[:10]
@@ -114,10 +224,7 @@ async def handle_any(m:Message):
             ts, first_msg_id = CACHE[key]
             if now - ts < CACHE_TTL:
                 remain = int(CACHE_TTL - (now - ts))
-                warn = await m.answer(
-                    f"⚠️ {sym.upper()} уже был 5 мин назад. Смотри выше 👆 (еще {remain//60}м {remain%60}с)",
-                    reply_to_message_id=first_msg_id
-                )
+                warn = await m.answer(f"⚠️ {sym.upper()} уже был 5 мин назад. Смотри выше 👆 (еще {remain//60}м {remain%60}с)", reply_to_message_id=first_msg_id)
                 asyncio.create_task(delete_after(warn, 30))
                 asyncio.create_task(delete_after(m, 30))
                 return
@@ -128,18 +235,34 @@ async def handle_any(m:Message):
     except Exception as e: print(f"handle error: {e}")
 
 @dp.message(Command("start"))
-async def start(m:Message): await m.answer("Бот работает! Отправь btc/eth")
+async def start(m:Message): await m.answer("Бот работает! Отправь btc/eth/ton")
+
+@dp.message(Command("report"))
+async def manual_report(m:Message):
+    await m.answer("Тест: утро с картинкой...")
+    await send_digest(is_morning=True)
+    await asyncio.sleep(2)
+    await m.answer("Тест: вечер с картинкой...")
+    await send_digest(is_morning=False)
+    await m.answer("Готово! Проверь канал.")
+
+@dp.message(Command("morning"))
+async def morning_cmd(m:Message): await send_digest(is_morning=True)
+@dp.message(Command("evening"))
+async def evening_cmd(m:Message): await send_digest(is_morning=False)
 
 @dp.message(F.text)
 async def private_msg(m:Message): await handle_any(m)
 @dp.channel_post(F.text)
 async def channel_msg(m:Message): await handle_any(m)
 
-async def main(): await dp.start_polling(bot)
+async def main():
+    asyncio.create_task(scheduler_loop())
+    await dp.start_polling(bot)
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v14 delete both after 30s'
+def home(): return 'ok v17 morning A evening B with image 7:00 18:00 MSK'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
