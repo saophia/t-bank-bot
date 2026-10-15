@@ -1,4 +1,4 @@
-import os, asyncio, aiohttp, random, time, re
+import os, asyncio, aiohttp, random, time, re, io, textwrap
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BufferedInputFile
 from flask import Flask
 import threading
+from PIL import Image, ImageDraw, ImageFont
 
 TOKEN = os.getenv("BOT_TOKEN")
 REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1004496994086"
@@ -51,16 +52,39 @@ async def fetch_og_image(session, url):
     except: pass
     return ""
 
+def generate_news_image(title, source="Crypto"):
+    # 生成相关图：标题写在图上，保证相关性
+    W,H = 800,450
+    img = Image.new('RGB', (W,H), color=(13, 17, 33))
+    draw = ImageDraw.Draw(img)
+    # 渐变
+    for y in range(H):
+        draw.line([(0,y),(W,y)], fill=(13+int(y*0.15), 17+int(y*0.12), 33+int(y*0.25)))
+    draw.rectangle([0,0,W,80], fill=(26,34,66))
+    draw.text((25,20), f"{source} | {datetime.now().strftime('%d.%m')}", fill=(120,180,255))
+    # 标题换行
+    wrapped = textwrap.wrap(title, width=32)
+    y = 120
+    for line in wrapped[:4]:
+        draw.text((25,y), line, fill=(255,255,255))
+        y+=55
+    draw.text((25, H-40), "#Крипто Навигатор", fill=(100,100,120))
+    # BTC装饰
+    draw.ellipse([600,-50,850,200], fill=(255,153,0), width=0)
+    draw.text((670,60), "₿", fill=(0,0,0))
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=88)
+    buf.seek(0)
+    return buf.read()
+
 async def download_image_bytes(session, url):
-    # 关键修复：下载成bytes再上传，绕过Telegram拉不到外链的问题
     try:
-        async with session.get(url, timeout=12, headers={"User-Agent":"Mozilla/5.0","Referer":"https://cointelegraph.com/"}) as r:
+        async with session.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0","Referer":"https://cointelegraph.com/"}) as r:
             if r.status==200:
                 data = await r.read()
-                if len(data) > 5000: # 过滤空图
+                if len(data) > 8000:
                     return data
-    except Exception as e:
-        print(f"download img failed {url[:60]} {e}")
+    except: pass
     return None
 
 async def get_analysis(symbol="btc"):
@@ -153,11 +177,11 @@ async def price_alert_loop():
 
 async def get_top5_news():
     backup_news = [
-        {"title":"BTC удержался выше $80k, киты продолжают покупать на падении","url":"https://cointelegraph.com","source":"BTC","image":"https://picsum.photos/seed/btc80k/800/450"},
-        {"title":"TON обновил рекорд по транзакциям, сеть растет","url":"https://ton.org","source":"TON","image":"https://picsum.photos/seed/tonnews/800/450"},
-        {"title":"ETF на Bitcoin зафиксировали рекордный приток за неделю","url":"https://www.coindesk.com","source":"ETF","image":"https://picsum.photos/seed/etfbtc/800/450"},
-        {"title":"FED намекнул на снижение ставки в декабре, рынок ждет","url":"https://cointelegraph.com","source":"FED","image":"https://picsum.photos/seed/fed2024/800/450"},
-        {"title":"Киты перевели 1 млрд USDT на биржи перед движением","url":"https://cryptopanic.com","source":"Whales","image":"https://picsum.photos/seed/whale1b/800/450"},
+        {"title":"BTC удержался выше $80k, киты продолжают покупать","url":"https://cointelegraph.com","source":"BTC"},
+        {"title":"TON обновил рекорд по транзакциям, сеть растет","url":"https://ton.org","source":"TON"},
+        {"title":"ETF на Bitcoin зафиксировали рекордный приток","url":"https://www.coindesk.com","source":"ETF"},
+        {"title":"FED намекнул на снижение ставки в декабре","url":"https://cointelegraph.com","source":"FED"},
+        {"title":"Киты перевели 1 млрд USDT на биржи","url":"https://cryptopanic.com","source":"Whales"},
     ]
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         data=await fetch_json(s,"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=CryptoRadar300")
@@ -172,16 +196,8 @@ async def get_top5_news():
                 raw.append({"title":title,"url":n['url'],"source":n.get('categories','').split('|')[0] if n.get('categories') else 'Crypto'})
                 if len(raw)>=5: break
         if not raw: raw = backup_news
-        news_list=[]
-        for item in raw:
-            img=item.get("image","")
-            if not img: img=await fetch_og_image(s, item["url"])
-            if not img: img=f"https://picsum.photos/seed/{random.randint(1000,99999)}/800/450"
-            item["image"]=img
-            news_list.append(item)
-            await asyncio.sleep(0.1)
         final=[]; seen_final=set()
-        for n in news_list+backup_news:
+        for n in raw+backup_news:
             k=n["title"][:40].lower()
             if k in seen_final: continue
             seen_final.add(k)
@@ -202,7 +218,7 @@ async def build_digest(is_morning=True):
     else:
         news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:80]}</a> [{n["source"]}]\n' for i,n in enumerate(top5,1)])
         text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>\nЗа день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%\nИндекс страха: {results['BTC']['fg_val']}\n📌 <b>Что случилось сегодня:</b>\n{news_block}\nЗавтра в 7:00 утренний дайджест.\n#вечер #TON\n"""
-    return text, top5
+    return text, top5, results
 
 async def send_digest(is_morning=True):
     try:
@@ -211,49 +227,42 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text="📊 Разобрать монету", url=f"https://t.me/{me.username}?start=analyze")],
             [InlineKeyboardButton(text="💬 Перейти в чат", url=CHAT_INVITE_LINK)]
         ])
-        text, top5 = await build_digest(is_morning)
-        image_urls = [n["image"] for n in top5 if n.get("image")][:3]
-        print(f"DEBUG try images: {image_urls}")
+        text, top5, results = await build_digest(is_morning)
 
+        # 尝试下载真实原图 + 失败则生成相关标题图
+        media_bytes = []
         async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as sess:
-            # 下载封面图
-            cover_bytes = None
-            for url in image_urls:
-                cover_bytes = await download_image_bytes(sess, url)
-                if cover_bytes:
-                    first_url = url
-                    break
+            for n in top5[:3]:
+                real_bytes = None
+                if n.get("url"):
+                    og_url = await fetch_og_image(sess, n["url"])
+                    if og_url:
+                        real_bytes = await download_image_bytes(sess, og_url)
+                if real_bytes:
+                    media_bytes.append(real_bytes)
+                    print(f"Real image ok: {n['title'][:30]}")
+                else:
+                    # 生成相关图，带标题
+                    gen = generate_news_image(n["title"], n.get("source","Crypto"))
+                    media_bytes.append(gen)
+                    print(f"Generated relevant image: {n['title'][:30]}")
 
-            # 如果一张都下不到，用picsum兜底，保证有图
-            if not cover_bytes:
-                fallback_url = f"https://picsum.photos/seed/{random.randint(1,99999)}/800/450"
-                cover_bytes = await download_image_bytes(sess, fallback_url)
-                first_url = fallback_url
-
-            if cover_bytes:
-                photo = BufferedInputFile(cover_bytes, filename="cover.jpg")
-                try:
-                    await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=photo, caption=text, parse_mode="HTML", reply_markup=keyboard)
-                    print(f"✅ {'MORNING' if is_morning else 'EVENING'} PHOTO BYTES SENT")
-                    # 再发相册
-                    if len(image_urls) > 1:
-                        media_files = []
-                        for u in image_urls[1:3]:
-                            b = await download_image_bytes(sess, u)
-                            if b:
-                                media_files.append(InputMediaPhoto(media=BufferedInputFile(b, filename=f"{random.randint(1,9999)}.jpg")))
-                        if media_files:
-                            await bot.send_media_group(chat_id=int(REPORT_CHAT_ID), media=media_files)
-                    return
-                except Exception as e:
-                    print(f"Photo bytes send failed: {e}")
+        if media_bytes:
+            first = BufferedInputFile(media_bytes[0], filename="cover.jpg")
+            await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=first, caption=text, parse_mode="HTML", reply_markup=keyboard)
+            if len(media_bytes)>1:
+                more = [InputMediaPhoto(media=BufferedInputFile(b, filename=f"{i}.jpg")) for i,b in enumerate(media_bytes[1:],1)]
+                if more:
+                    await bot.send_media_group(chat_id=int(REPORT_CHAT_ID), media=more)
+            print(f"✅ {'MORNING' if is_morning else 'EVENING'} WITH RELEVANT IMAGES SENT")
+            return
 
         await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard)
     except Exception as e:
         print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
-    print("Scheduler 07:00 and 19:00 MSK with bytes upload")
+    print("Scheduler 07:00 and 19:00 MSK RELEVANT IMAGES")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -298,7 +307,7 @@ async def handle_any(m:Message):
 async def start(m:Message): await m.answer("Привет! Напиши тикер любой монеты: BTC, ETH, TON, SOL, DOGE...")
 @dp.message(Command("report"))
 async def manual_report(m:Message):
-    await m.answer("Отправляю с картинками (bytes upload)...")
+    await m.answer("Отправляю с релевантными картинками...")
     await send_digest(False)
 @dp.message(F.text)
 async def private_msg(m:Message): await handle_any(m)
@@ -311,7 +320,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v28 bytes upload 07:00 19:00'
+def home(): return 'ok v30 relevant images 07:00 19:00'
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
 if __name__=="__main__":
