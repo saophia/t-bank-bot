@@ -43,7 +43,6 @@ async def fetch_json(session, url):
     return None
 
 async def get_analysis(symbol="btc"):
-    #... 你的原有 get_analysis 保持不变，为了省字我省略，V18的直接粘过来...
     sym = symbol.upper()
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         price_usd=0; change=0
@@ -172,7 +171,6 @@ async def price_alert_loop():
                 print(f"Alert loop error: {e}")
                 await asyncio.sleep(60)
 
-# --- 下面是你原有的 morning/evening/build_digest/send_digest 保持不变 ---
 async def get_top5_news():
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         data=await fetch_json(s,"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=CryptoRadar300")
@@ -241,7 +239,7 @@ async def scheduler_loop():
             if now_msk.hour==7 and now_msk.minute==0:
                 if LAST_REPORTS["morning"]!=now_msk.date():
                     await send_digest(True); LAST_REPORTS["morning"]=now_msk.date()
-            if now_msk.hour==18 and now_msk.minute==0:
+            if now_msk.hour==19 and now_msk.minute==30: # 晚报改为19:30
                 if LAST_REPORTS["evening"]!=now_msk.date():
                     await send_digest(False); LAST_REPORTS["evening"]=now_msk.date()
             await asyncio.sleep(30)
@@ -289,7 +287,6 @@ async def manual_report(m:Message):
 
 @dp.message(Command("testalert"))
 async def test_alert(m:Message):
-    # 手动测试报警
     me=await bot.get_me()
     kb=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Разбор BTC", url=f"https://t.me/{me.username}?start=BTC")],
@@ -305,12 +302,12 @@ async def channel_msg(m:Message): await handle_any(m)
 
 async def main():
     asyncio.create_task(scheduler_loop())
-    asyncio.create_task(price_alert_loop()) # 启动报警
+    asyncio.create_task(price_alert_loop())
     await dp.start_polling(bot)
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v19 with alerts'
+def home(): return 'ok v20 19:30 evening'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
