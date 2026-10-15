@@ -90,12 +90,19 @@ def format_text(symbol,a):
 Не фин. совет
 💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉 @tbank_usdt_bot"""
 
+# 新增：30秒后删除
+async def delete_after(msg: Message, delay: int):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except: pass
+
 async def handle_any(m:Message):
     try:
         if m.from_user and m.from_user.is_bot:
             return
         txt_full = m.text or ""
-        if "Анализ" in txt_full or "уже был 5 мин" in txt_full or "Курс T-Bank" in txt_full:
+        if "Анализ" in txt_full or "уже был" in txt_full or "Курс T-Bank" in txt_full:
             return
         txt=txt_full.lower().strip().split()[0]
         if not txt: return
@@ -107,10 +114,12 @@ async def handle_any(m:Message):
             ts, first_msg_id = CACHE[key]
             if now - ts < CACHE_TTL:
                 remain = int(CACHE_TTL - (now - ts))
-                await m.answer(
+                warn = await m.answer(
                     f"⚠️ {sym.upper()} уже был 5 мин назад. Смотри выше 👆 (еще {remain//60}м {remain%60}с)",
                     reply_to_message_id=first_msg_id
                 )
+                # 30秒后自动删除这条提示
+                asyncio.create_task(delete_after(warn, 30))
                 return
         a=await get_analysis(sym)
         text=format_text(sym,a)
@@ -130,7 +139,7 @@ async def main(): await dp.start_polling(bot)
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v12 cache jump fix'
+def home(): return 'ok v13 delete after 30s'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
