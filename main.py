@@ -3,17 +3,16 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BufferedInputFile
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from flask import Flask
 import threading
 
-# PIL 可选导入，不会再崩
 try:
     from PIL import Image, ImageDraw
     HAS_PIL = True
 except:
     HAS_PIL = False
-    print("WARNING: Pillow not installed, will send text fallback")
+    print("WARNING: Pillow not installed")
 
 TOKEN = os.getenv("BOT_TOKEN")
 REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1004496994086"
@@ -225,6 +224,7 @@ async def build_digest(is_morning=True):
         text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>\nЗа день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%\nИндекс страха: {results['BTC']['fg_val']}\n📌 <b>Что случилось сегодня:</b>\n{news_block}\nЗавтра в 7:00 утренний дайджест.\n#вечер #TON\n"""
     return text, top5, results
 
+# === 唯一修改的地方：只发1张图，不发相册 ===
 async def send_digest(is_morning=True):
     try:
         me=await bot.get_me()
@@ -233,38 +233,29 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text="💬 Перейти в чат", url=CHAT_INVITE_LINK)]
         ])
         text, top5, results = await build_digest(is_morning)
-        media_bytes = []
+        cover_bytes = None
+
         async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as sess:
-            for n in top5[:3]:
-                real_bytes = None
-                if n.get("url"):
-                    og_url = await fetch_og_image(sess, n["url"])
-                    if og_url:
-                        real_bytes = await download_image_bytes(sess, og_url)
-                if real_bytes:
-                    media_bytes.append(real_bytes)
-                else:
-                    if HAS_PIL:
-                        gen = generate_news_image(n["title"], n.get("source","Crypto"))
-                        if gen:
-                            media_bytes.append(gen)
-        if media_bytes:
-            first = BufferedInputFile(media_bytes[0], filename="cover.jpg")
-            await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=first, caption=text, parse_mode="HTML", reply_markup=keyboard)
-            if len(media_bytes)>1:
-                more = [InputMediaPhoto(media=BufferedInputFile(b, filename=f"{i}.jpg")) for i,b in enumerate(media_bytes[1:],1)]
-                if more:
-                    try:
-                        await bot.send_media_group(chat_id=int(REPORT_CHAT_ID), media=more)
-                    except: pass
-            print(f"✅ {'MORNING' if is_morning else 'EVENING'} WITH RELEVANT IMAGES SENT")
+            n = top5[0] if top5 else None
+            if n and n.get("url"):
+                og_url = await fetch_og_image(sess, n["url"])
+                if og_url:
+                    cover_bytes = await download_image_bytes(sess, og_url)
+            if not cover_bytes and HAS_PIL and n:
+                cover_bytes = generate_news_image(n["title"], n.get("source","Crypto"))
+
+        if cover_bytes:
+            photo = BufferedInputFile(cover_bytes, filename="cover.jpg")
+            await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=photo, caption=text, parse_mode="HTML", reply_markup=keyboard)
+            print(f"✅ {'MORNING' if is_morning else 'EVENING'} SINGLE IMAGE SENT")
             return
+
         await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard)
     except Exception as e:
         print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
-    print("Scheduler 07:00 and 19:00 MSK RELEVANT IMAGES")
+    print("Scheduler 07:00 and 19:00 MSK SINGLE IMAGE")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -309,7 +300,7 @@ async def handle_any(m:Message):
 async def start(m:Message): await m.answer("Привет! Напиши тикер любой монеты: BTC, ETH, TON, SOL, DOGE...")
 @dp.message(Command("report"))
 async def manual_report(m:Message):
-    await m.answer("Отправляю с релевантными картинками...")
+    await m.answer("Отправляю дайджест...")
     await send_digest(False)
 @dp.message(F.text)
 async def private_msg(m:Message): await handle_any(m)
@@ -322,9 +313,10 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v30b relevant images + PIL fallback 07:00 19:00'
+def home(): return 'ok v31 single image 07:00 19:00'
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
 if __name__=="__main__":
     threading.Thread(target=run_flask,daemon=True).start()
     asyncio.run(main())
+    
