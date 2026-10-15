@@ -8,7 +8,7 @@ from flask import Flask
 import threading
 
 TOKEN = os.getenv("BOT_TOKEN")
-REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1004496994086" # 你的频道ID内置
+REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1004496994086"
 CHAT_INVITE_LINK = "https://t.me/+emuZSO-ueBxlN2Ix"
 
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
@@ -150,14 +150,29 @@ async def get_top5_news():
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         data=await fetch_json(s,"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=CryptoRadar300")
         news_list=[]
+        seen=set()
         if data and data.get('Data'):
-            for n in data['Data'][:15]:
-                if len(n['title'])<15: continue
-                news_list.append({"title":n['title'].strip(),"url":n['url'],"source":n.get('categories','').split('|')[0] if n.get('categories') else 'Crypto',"image":n.get('imageurl','')})
+            for n in data['Data'][:30]:
+                title=n['title'].strip()
+                if len(title)<15: continue
+                key=title[:40].lower()
+                if key in seen: continue
+                seen.add(key)
+                news_list.append({"title":title,"url":n['url'],"source":n.get('categories','').split('|')[0] if n.get('categories') else 'Crypto',"image":n.get('imageurl','')})
                 if len(news_list)>=5: break
         if len(news_list)<5:
-            backup=[{"title":"Bitcoin ETF рекордный приток","url":"https://cointelegraph.com","source":"ETF","image":""}]*5
-            news_list=(news_list+backup)[:5]
+            backup=[
+                {"title":"Fed намекает на снижение ставки в декабре","url":"https://cointelegraph.com","source":"FED","image":""},
+                {"title":"BlackRock купил еще 500 BTC на падении","url":"https://coindesk.com","source":"ETF","image":""},
+                {"title":"TON обновил рекорд по транзакциям","url":"https://ton.org","source":"TON","image":""},
+                {"title":"Киты перевели 1 млрд USDT на биржи","url":"https://cryptopanic.com/","source":"Whales","image":""},
+                {"title":"Solana DEX объем обогнал Ethereum","url":"https://defillama.com","source":"DeFi","image":""},
+            ]
+            for b in backup:
+                if len(news_list)>=5: break
+                if b["title"][:40].lower() not in seen:
+                    news_list.append(b)
+                    seen.add(b["title"][:40].lower())
         return news_list[:5]
 
 async def build_digest(is_morning=True):
@@ -198,17 +213,16 @@ async def send_digest(is_morning=True):
         print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
-    print("Scheduler started, waiting for 07:00 and 19:30 MSK")
+    print("Scheduler started, waiting for 07:00 and 19:50 MSK")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
-            # 早报 7:00
             if now_msk.hour==7 and 0 <= now_msk.minute < 2:
                 if LAST_REPORTS["morning"]!=now_msk.date():
                     print(f"Trigger morning {now_msk}")
                     await send_digest(True); LAST_REPORTS["morning"]=now_msk.date()
-            # 晚报 19:30 - 改成2分钟窗口防漏发
-            if now_msk.hour==19 and 30 <= now_msk.minute < 32:
+            # 晚报改为 19:50 MSK
+            if now_msk.hour==19 and 50 <= now_msk.minute < 52:
                 if LAST_REPORTS["evening"]!=now_msk.date():
                     print(f"Trigger evening {now_msk}")
                     await send_digest(False); LAST_REPORTS["evening"]=now_msk.date()
@@ -278,7 +292,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v21 19:30 evening with logs'
+def home(): return 'ok v22 19:50 evening'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
