@@ -7,6 +7,8 @@ from flask import Flask
 import threading
 
 TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("BOT_TOKEN not set!")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -85,7 +87,6 @@ async def get_analysis(symbol="btc"):
                 {"title": f"{sym} хешрейт обновил ATH - фундаментально сильно", "url": f"https://cointelegraph.com/search?query={sym}"},
                 {"title": "Инфляция в США ниже ожиданий - риск-аппетит растет", "url": "https://www.coindesk.com/markets/"},
                 {"title": "Tether напечатал 1 млрд USDT - приток ликвидности", "url": "https://cryptopanic.com/"},
-                {"title": "BlackRock увеличил позицию в крипте", "url": "https://www.coindesk.com/business/"},
             ]
             random.shuffle(fallback)
             news_with_links = (news_with_links + fallback)[:3]
@@ -153,10 +154,11 @@ async def main():
 app=Flask(__name__)
 @app.route('/')
 def home():
-    return 'ok v9 no buttons clickable news'
+    return 'ok v10 no buttons'
 
 def run_flask():
-    app.run(host='0.0.0.0', port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 if __name__=="__main__":
     threading.Thread(target=run_flask, daemon=True).start()
