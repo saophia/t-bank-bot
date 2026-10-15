@@ -1,11 +1,12 @@
-import os, asyncio, aiohttp, random, time, re
+import os, asyncio, aiohttp, random, time, re, io
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, BufferedInputFile
 from flask import Flask
 import threading
+from PIL import Image, ImageDraw
 
 TOKEN = os.getenv("BOT_TOKEN")
 REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1004496994086"
@@ -46,10 +47,51 @@ async def fetch_og_image(session, url):
             if m:
                 img=m.group(1)
                 if img.startswith("//"): img="https:"+img
-                if any(x in img.lower() for x in ["logo","icon","avatar"]): return ""
+                if any(x in img.lower() for x in ["logo","icon","avatar","sprite"]): return ""
                 if img.startswith("http"): return img
     except: pass
     return ""
+
+def generate_cover_image(is_morning, btc_change, ton_change, date_str):
+    # 本地生成封面，保证一定有图
+    W,H = 800, 450
+    img = Image.new('RGB', (W,H), color=(0,0,0))
+    draw = ImageDraw.Draw(img)
+    # 渐变背景
+    for y in range(H):
+        r = int(15 + y*0.2)
+        g = int(20 + y*0.15)
+        b = int(45 + y*0.3)
+        draw.line([(0,y),(W,y)], fill=(r,g,b))
+    # 装饰圈
+    draw.ellipse([500,-100,900,300], fill=(80,60,200,120))
+    draw.ellipse([-150,250,300,600], fill=(0,200,150,80))
+    # 文字 - 用默认字体，不依赖外部字体文件
+    title = "☀️ УТРЕННИЙ ДАЙДЖЕСТ" if is_morning else "🌙 ВЕЧЕРНИЙ ИТОГ"
+    try:
+        # 尝试加载大字体
+        draw.text((40,40), title, fill=(255,255,255), font=None)
+        draw.text((40,90), f"{date_str}", fill=(200,200,255))
+        draw.text((40,150), f"BTC {btc_change:+.1f}% | TON {ton_change:+.1f}%", fill=(255,230,100))
+        draw.text((40,200), f"5 главных новостей", fill=(180,255,180))
+        draw.text((40,380), "#КриптоНавигатор", fill=(150,150,150))
+    except:
+        draw.text((40,40), title, fill=(255,255,255))
+        draw.text((40,90), date_str, fill=(255,255,255))
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85)
+    buf.seek(0)
+    return buf.read()
+
+async def download_image_bytes(session, url):
+    try:
+        async with session.get(url, timeout=8, headers={"User-Agent":"Mozilla/5.0"}) as r:
+            if r.status==200:
+                data = await r.read()
+                if len(data) > 8000:
+                    return data
+    except: pass
+    return None
 
 async def get_analysis(symbol="btc"):
     sym=symbol.upper()
@@ -141,11 +183,11 @@ async def price_alert_loop():
 
 async def get_top5_news():
     backup_news = [
-        {"title":"BTC удержался выше $80k, киты продолжают покупать","url":"https://cointelegraph.com","source":"BTC","image":"https://images.cointelegraph.com/images/840_aHR0cHM6Ly9zMy5jb2ludGVsZWdyYXBoLmNvbS91cGxvYWRzLzIwMjQtMDEvZjYzMzJjMjMtOTc2MC00YmU1LWEyZDAtMjU1NmJiN2Y1YzQzLmpwZw==.jpg"},
-        {"title":"TON обновил рекорд по транзакциям в сети","url":"https://ton.org","source":"TON","image":"https://ton.org/download/ton_symbol.png"},
-        {"title":"ETF на Bitcoin зафиксировали рекордный приток за неделю","url":"https://www.coindesk.com","source":"ETF","image":"https://images.cointelegraph.com/cdn-cgi/image/format=auto,onerror=redirect,quality=90,width=840/https://s3.cointelegraph.com/uploads/2023-06/b49ae910-e618-4cd2-b510-b517e37fe3f1.jpg"},
-        {"title":"FED намекнул на снижение ставки в декабре","url":"https://cointelegraph.com","source":"FED","image":"https://picsum.photos/seed/fednews/800/450"},
-        {"title":"Киты перевели 1 млрд USDT на биржи перед пампом","url":"https://cryptopanic.com","source":"Whales","image":"https://picsum.photos/seed/whales/800/450"},
+        {"title":"BTC удержался выше $80k, киты продолжают покупать на падении","url":"https://cointelegraph.com","source":"BTC"},
+        {"title":"TON обновил рекорд по транзакциям, сеть растет","url":"https://ton.org","source":"TON"},
+        {"title":"ETF на Bitcoin зафиксировали рекордный приток за неделю","url":"https://www.coindesk.com","source":"ETF"},
+        {"title":"FED намекнул на снижение ставки в декабре, рынок ждет","url":"https://cointelegraph.com","source":"FED"},
+        {"title":"Киты перевели 1 млрд USDT на биржи перед движением","url":"https://cryptopanic.com","source":"Whales"},
     ]
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         data=await fetch_json(s,"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=CryptoRadar300")
@@ -160,19 +202,12 @@ async def get_top5_news():
                 raw.append({"title":title,"url":n['url'],"source":n.get('categories','').split('|')[0] if n.get('categories') else 'Crypto'})
                 if len(raw)>=5: break
         if not raw: raw = backup_news
-        news_list=[]
-        for item in raw:
-            img=item.get("image","")
-            if not img: img=await fetch_og_image(s, item["url"])
-            if not img: img=f"https://picsum.photos/seed/{random.randint(1000,99999)}/800/450"
-            item["image"]=img
-            news_list.append(item)
-            await asyncio.sleep(0.1)
         final=[]; seen_final=set()
-        for n in news_list+backup_news:
+        for n in raw+backup_news:
             k=n["title"][:40].lower()
             if k in seen_final: continue
             seen_final.add(k)
+            if "image" not in n: n["image"]=""
             final.append(n)
             if len(final)>=5: break
         return final[:5]
@@ -190,7 +225,7 @@ async def build_digest(is_morning=True):
     else:
         news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:80]}</a> [{n["source"]}]\n' for i,n in enumerate(top5,1)])
         text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>\nЗа день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%\nИндекс страха: {results['BTC']['fg_val']}\n📌 <b>Что случилось сегодня:</b>\n{news_block}\nЗавтра в 7:00 утренний дайджест.\n#вечер #TON\n"""
-    return text, top5
+    return text, top5, results
 
 async def send_digest(is_morning=True):
     try:
@@ -199,27 +234,39 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text="📊 Разобрать монету", url=f"https://t.me/{me.username}?start=analyze")],
             [InlineKeyboardButton(text="💬 Перейти в чат", url=CHAT_INVITE_LINK)]
         ])
-        text, top5 = await build_digest(is_morning)
-        valid_images = [n["image"] for n in top5 if n.get("image") and n["image"].startswith("http")]
-        print(f"DEBUG images: {len(valid_images)}")
-        if valid_images:
-            try:
-                await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=valid_images[0], caption=text, parse_mode="HTML", reply_markup=keyboard)
-                # 早晚都带相册
-                if len(valid_images)>1:
-                    media=[InputMediaPhoto(media=u) for u in valid_images[1:3]]
-                    if media:
-                        await bot.send_media_group(chat_id=int(REPORT_CHAT_ID), media=media)
-                print(f"✅ {'MORNING' if is_morning else 'EVENING'} WITH IMAGES SENT")
-                return
-            except Exception as e:
-                print(f"Photo failed: {e}")
-        await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard)
+        text, top5, results = await build_digest(is_morning)
+
+        # 1. 先尝试下载真实新闻图
+        cover_bytes = None
+        async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as sess:
+            for n in top5:
+                if n.get("url"):
+                    og = await fetch_og_image(sess, n["url"])
+                    if og:
+                        cover_bytes = await download_image_bytes(sess, og)
+                        if cover_bytes: break
+
+        # 2. 下载失败就本地生成封面，保证100%有图
+        if not cover_bytes:
+            date_str = datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
+            btc_c = results.get('BTC',{}).get('change',0)
+            ton_c = results.get('TON',{}).get('change',0)
+            cover_bytes = generate_cover_image(is_morning, btc_c, ton_c, date_str)
+            print("Generated local cover image")
+
+        photo = BufferedInputFile(cover_bytes, filename="cover.jpg")
+        await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=photo, caption=text, parse_mode="HTML", reply_markup=keyboard)
+        print(f"✅ {'MORNING' if is_morning else 'EVENING'} WITH IMAGE SENT")
+
     except Exception as e:
         print(f"❌ DIGEST FAILED: {e}")
+        # 最后兜底纯文字
+        try:
+            await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard)
+        except: pass
 
 async def scheduler_loop():
-    print("Scheduler 07:00 and 19:00 MSK with images")
+    print("Scheduler 07:00 and 19:00 MSK LOCAL IMAGE")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -264,7 +311,7 @@ async def handle_any(m:Message):
 async def start(m:Message): await m.answer("Привет! Напиши тикер любой монеты: BTC, ETH, TON, SOL, DOGE...")
 @dp.message(Command("report"))
 async def manual_report(m:Message):
-    await m.answer("Отправляю с картинками...")
+    await m.answer("Отправляю с локальной картинкой...")
     await send_digest(False)
 @dp.message(F.text)
 async def private_msg(m:Message): await handle_any(m)
@@ -277,7 +324,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v27 morning+evening with images 07:00 19:00'
+def home(): return 'ok v29 local image guaranteed 07:00 19:00'
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
 if __name__=="__main__":
