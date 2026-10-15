@@ -8,7 +8,7 @@ from flask import Flask
 import threading
 
 TOKEN = os.getenv("BOT_TOKEN")
-REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID")
+REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1004496994086" # 你的频道ID内置
 CHAT_INVITE_LINK = "https://t.me/+emuZSO-ueBxlN2Ix"
 
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
@@ -16,13 +16,13 @@ if not TOKEN: raise ValueError("BOT_TOKEN not set!")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 CACHE = {}
-PRICE_HISTORY = {} # symbol -> list of (timestamp, price)
-LAST_ALERT = {} # symbol -> last alert time
+PRICE_HISTORY = {}
+LAST_ALERT = {}
 CACHE_TTL = 300
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 LAST_REPORTS = {"morning": None, "evening": None}
 
-ALERT_COOLDOWN = 3600 # 1小时同币只报一次
+ALERT_COOLDOWN = 3600
 WATCH_LIST = ["BTC","ETH","TON","SOL","DOGE","PEPE","NOT","DOGS"]
 
 def calc_rsi_fixed(prices, period=14):
@@ -101,7 +101,6 @@ def format_text(symbol,a):
 💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉 @tbank_usdt_bot
 #{symbol.upper()}"""
 
-# --- 新增：报警核心 ---
 async def price_alert_loop():
     print("🚨 Alert loop started")
     await asyncio.sleep(10)
@@ -114,59 +113,35 @@ async def price_alert_loop():
                     if not data or 'lastPrice' not in data: continue
                     price = float(data['lastPrice'])
                     now = time.time()
-
-                    # 记录历史
                     if sym not in PRICE_HISTORY: PRICE_HISTORY[sym] = []
                     PRICE_HISTORY[sym].append((now, price))
-                    # 只保留1小时内的
                     PRICE_HISTORY[sym] = [(t,p) for t,p in PRICE_HISTORY[sym] if now-t <= 3600]
-
                     if len(PRICE_HISTORY[sym]) < 2: continue
-
-                    # 计算5分钟和1小时涨跌
                     price_5m = next((p for t,p in reversed(PRICE_HISTORY[sym]) if now-t >= 300), None)
                     price_1h = PRICE_HISTORY[sym][0][1]
-
                     if not price_5m: continue
-
                     change_5m = (price - price_5m) / price_5m * 100
                     change_1h = (price - price_1h) / price_1h * 100
-
                     should_alert = None
-                    emoji = "🚨"
                     if abs(change_5m) >= 2.5:
                         should_alert = f"⚡️ <b>{sym} ПАМП</b>" if change_5m>0 else f"⚡️ <b>{sym} ДАМП</b>"
-                        emoji = "🚀" if change_5m>0 else "📉"
                     elif abs(change_1h) >= 4.0:
                         should_alert = f"🚨 <b>{sym} ВЗЛЕТ +{change_1h:.1f}% за час</b>" if change_1h>0 else f"🚨 <b>{sym} ОБВАЛ {change_1h:.1f}% за час</b>"
-
                     if should_alert:
-                        if sym in LAST_ALERT and now - LAST_ALERT[sym] < ALERT_COOLDOWN:
-                            continue
-
+                        if sym in LAST_ALERT and now - LAST_ALERT[sym] < ALERT_COOLDOWN: continue
                         LAST_ALERT[sym] = now
                         me = await bot.get_me()
                         keyboard = InlineKeyboardMarkup(inline_keyboard=[
                             [InlineKeyboardButton(text=f"📊 Разбор {sym}", url=f"https://t.me/{me.username}?start={sym}")],
                             [InlineKeyboardButton(text="💬 Обсудить в чате", url=CHAT_INVITE_LINK)]
                         ])
-
-                        text = f"""{emoji} {should_alert} | {datetime.now(MOSCOW_TZ).strftime('%H:%M МСК')}
-
-💰 Сейчас: ${price:,.4f}
-📈 5 мин: {change_5m:+.2f}%
-📈 1 час: {change_1h:+.2f}%
-
-Что делать? Жми разбор 👇
-#{sym} #alert
-"""
+                        text = f"""{should_alert} | {datetime.now(MOSCOW_TZ).strftime('%H:%M МСК')}\n\n💰 Сейчас: ${price:,.4f}\n📈 5 мин: {change_5m:+.2f}%\n📈 1 час: {change_1h:+.2f}%\n\nЧто делать? Жми разбор 👇\n#{sym} #alert"""
                         try:
                             await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", reply_markup=keyboard)
                             print(f"ALERT SENT: {sym} {change_5m:.1f}%")
                         except Exception as e:
                             print(f"Alert send error: {e}")
-
-                await asyncio.sleep(60) # 每分钟查一次
+                await asyncio.sleep(60)
             except Exception as e:
                 print(f"Alert loop error: {e}")
                 await asyncio.sleep(60)
@@ -194,30 +169,18 @@ async def build_digest(is_morning=True):
     date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
     if is_morning:
         news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
-        text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b> #ton
-💰 Рынок: BTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%) | TON ${results['TON']['price']:.2f}
-🧠 Страх: {results['BTC']['fg_val']} ({results['BTC']['fg_text']})
-🔥 <b>ТОП-5 главных:</b>
-{news_block}
-⚡️ Вывод: {results['TON']['conclusion']}
-Напиши тикер в чате для разбора 👇
-#утро #BTC #TON
-"""
+        text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b> #ton\n💰 Рынок: BTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%) | TON ${results['TON']['price']:.2f}\n🧠 Страх: {results['BTC']['fg_val']} ({results['BTC']['fg_text']})\n🔥 <b>ТОП-5 главных:</b>\n{news_block}\n⚡️ Вывод: {results['TON']['conclusion']}\nНапиши тикер в чате для разбора 👇\n#утро #BTC #TON\n"""
     else:
         news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:80]}</a> [{n["source"]}]\n' for i,n in enumerate(top5,1)])
-        text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>
-За день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%
-Индекс страха: {results['BTC']['fg_val']}
-📌 <b>Что случилось сегодня:</b>
-{news_block}
-Завтра в 7:00 утренний дайджест.
-#вечер #TON
-"""
+        text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>\nЗа день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%\nИндекс страха: {results['BTC']['fg_val']}\n📌 <b>Что случилось сегодня:</b>\n{news_block}\nЗавтра в 7:00 утренний дайджест.\n#вечер #TON\n"""
     cover=top5[0].get('image','') if top5 else ''
     return text, cover
 
 async def send_digest(is_morning=True):
-    if not REPORT_CHAT_ID: return
+    print(f"=== TRY SEND DIGEST morning={is_morning} CHAT={REPORT_CHAT_ID} ===")
+    if not REPORT_CHAT_ID:
+        print("!!! REPORT_CHAT_ID empty, abort")
+        return
     try:
         me=await bot.get_me()
         keyboard=InlineKeyboardMarkup(inline_keyboard=[
@@ -225,26 +188,33 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text="💬 Перейти в чат", url=CHAT_INVITE_LINK)]
         ])
         text, img_url=await build_digest(is_morning)
+        print(f"Digest built, img={bool(img_url)} len={len(text)}")
         if img_url and img_url.startswith("http"):
             await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=img_url, caption=text, parse_mode="HTML", reply_markup=keyboard)
         else:
             await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard)
+        print(f"✅ DIGEST SENT to {REPORT_CHAT_ID}")
     except Exception as e:
-        print(f"Digest error: {e}")
+        print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
+    print("Scheduler started, waiting for 07:00 and 19:30 MSK")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
-            if now_msk.hour==7 and now_msk.minute==0:
+            # 早报 7:00
+            if now_msk.hour==7 and 0 <= now_msk.minute < 2:
                 if LAST_REPORTS["morning"]!=now_msk.date():
+                    print(f"Trigger morning {now_msk}")
                     await send_digest(True); LAST_REPORTS["morning"]=now_msk.date()
-            if now_msk.hour==19 and now_msk.minute==30: # 晚报改为19:30
+            # 晚报 19:30 - 改成2分钟窗口防漏发
+            if now_msk.hour==19 and 30 <= now_msk.minute < 32:
                 if LAST_REPORTS["evening"]!=now_msk.date():
+                    print(f"Trigger evening {now_msk}")
                     await send_digest(False); LAST_REPORTS["evening"]=now_msk.date()
             await asyncio.sleep(30)
         except Exception as e:
-            print(e); await asyncio.sleep(60)
+            print(f"Scheduler error: {e}"); await asyncio.sleep(60)
 
 async def delete_after(msg:Message, delay:int):
     await asyncio.sleep(delay)
@@ -282,7 +252,8 @@ async def start(m:Message): await m.answer("Привет! Напиши тике�
 
 @dp.message(Command("report"))
 async def manual_report(m:Message):
-    await m.answer("Отправляю тест...")
+    print(f"/report from {m.from_user.id}")
+    await m.answer("Отправляю тест в канал...")
     await send_digest(True)
 
 @dp.message(Command("testalert"))
@@ -307,7 +278,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v20 19:30 evening'
+def home(): return 'ok v21 19:30 evening with logs'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
