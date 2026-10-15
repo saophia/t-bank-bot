@@ -1,4 +1,4 @@
-import os, asyncio, aiohttp, random, time
+import os, asyncio, aiohttp, random, time, re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F
@@ -21,7 +21,6 @@ LAST_ALERT = {}
 CACHE_TTL = 300
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 LAST_REPORTS = {"morning": None, "evening": None}
-
 ALERT_COOLDOWN = 3600
 WATCH_LIST = ["BTC","ETH","TON","SOL","DOGE","PEPE","NOT","DOGS"]
 
@@ -42,14 +41,25 @@ async def fetch_json(session, url):
     except: pass
     return None
 
+async def fetch_og_image(session, url):
+    try:
+        async with session.get(url, timeout=8, headers={"User-Agent":"Mozilla/5.0"}) as r:
+            if r.status!=200: return ""
+            html = await r.text()
+            m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.I)
+            if not m: m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html, re.I)
+            if m:
+                img=m.group(1)
+                if img.startswith("//"): img="https:"+img
+                if "logo" in img.lower() or "icon" in img.lower(): return ""
+                return img
+    except: pass
+    return ""
+
 def fix_image_url(url):
     if not url: return ""
-    url = url.strip()
-    if url.startswith("/"):
-        return "https://www.cryptocompare.com" + url
-    if url.startswith("http"):
-        return url
-    return ""
+    if url.startswith("/"): return "https://www.cryptocompare.com"+url
+    return url if url.startswith("http") else ""
 
 async def get_analysis(symbol="btc"):
     sym = symbol.upper()
@@ -147,7 +157,6 @@ async def price_alert_loop():
                         text = f"""{should_alert} | {datetime.now(MOSCOW_TZ).strftime('%H:%M МСК')}\n\n💰 Сейчас: ${price:,.4f}\n📈 5 мин: {change_5m:+.2f}%\n📈 1 час: {change_1h:+.2f}%\n\nЧто делать? Жми разбор 👇\n#{sym} #alert"""
                         try:
                             await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", reply_markup=keyboard)
-                            print(f"ALERT SENT: {sym} {change_5m:.1f}%")
                         except Exception as e:
                             print(f"Alert send error: {e}")
                 await asyncio.sleep(60)
@@ -158,31 +167,24 @@ async def price_alert_loop():
 async def get_top5_news():
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         data=await fetch_json(s,"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=CryptoRadar300")
-        news_list=[]
-        seen=set()
+        raw=[]; seen=set()
         if data and data.get('Data'):
-            for n in data['Data'][:30]:
+            for n in data['Data'][:15]:
                 title=n['title'].strip()
                 if len(title)<15: continue
                 key=title[:40].lower()
                 if key in seen: continue
                 seen.add(key)
-                img = fix_image_url(n.get('imageurl',''))
-                news_list.append({"title":title,"url":n['url'],"source":n.get('categories','').split('|')[0] if n.get('categories') else 'Crypto',"image":img})
-                if len(news_list)>=5: break
-        if len(news_list)<5:
-            backup=[
-                {"title":"Fed намекает на снижение ставки в декабре","url":"https://cointelegraph.com","source":"FED","image":"https://images.cointelegraph.com/images/840_aHR0cHM6Ly9zMy5jb2ludGVsZWdyYXBoLmNvbS91cGxvYWRzLzIwMjQtMDEvZjYzMzJjMjMtOTc2MC00YmU1LWEyZDAtMjU1NmJiN2Y1YzQzLmpwZw==.jpg"},
-                {"title":"BlackRock купил еще 500 BTC на падении","url":"https://coindesk.com","source":"ETF","image":"https://www.coindesk.com/resizer/5P2v7p6R2Q5Y5Y5Y5Y5Y5Y5Y5Y5=/1200x628/center/middle/filters:quality(80)/cloudfront-us-east-1.images.arcpublishing.com/coindesk/ABC.jpg"},
-                {"title":"TON обновил рекорд по транзакциям","url":"https://ton.org","source":"TON","image":"https://ton.org/download/ton_symbol.png"},
-                {"title":"Киты перевели 1 млрд USDT на биржи","url":"https://cryptopanic.com/","source":"Whales","image":"https://cryptopanic.com/static/img/touch-icon-180x180.png"},
-                {"title":"Solana DEX объем обогнал Ethereum","url":"https://defillama.com","source":"DeFi","image":"https://defillama.com/defillama-press-kit/defi/PNG/defillama.png"},
-            ]
-            for b in backup:
-                if len(news_list)>=5: break
-                if b["title"][:40].lower() not in seen:
-                    news_list.append(b)
-                    seen.add(b["title"][:40].lower())
+                raw.append({"title":title,"url":n['url'],"source":n.get('categories','').split('|')[0] if n.get('categories') else 'Crypto'})
+                if len(raw)>=5: break
+        news_list=[]
+        for item in raw:
+            og = await fetch_og_image(s, item["url"])
+            item["image"] = og if og else ""
+            news_list.append(item)
+            await asyncio.sleep(0.15)
+        while len(news_list)<5:
+            news_list.append({"title":"Рынок в ожидании данных по инфляции","url":"https://cointelegraph.com","source":"Crypto","image":""})
         return news_list[:5]
 
 async def build_digest(is_morning=True):
@@ -192,27 +194,15 @@ async def build_digest(is_morning=True):
         await asyncio.sleep(0.3)
     top5=await get_top5_news()
     date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
-
-    # 带Emoji的板块图标
-    icons = {"FED":"🏦","ETF":"🐳","TON":"💎","Whales":"🐋","DeFi":"📊","BTC":"₿","ETH":"Ξ","Crypto":"🔥"}
-    def icon_for(src):
-        for k,v in icons.items():
-            if k.lower() in src.lower(): return v
-        return "📌"
-
     if is_morning:
-        news_block="".join([f'{i}. {icon_for(n["source"])} <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
-        text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>\n\n📊 <b>РЫНОК</b>\n├ BTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%) {'🟢' if results['BTC']['change']>=0 else '🔴'}\n└ TON ${results['TON']['price']:.2f} ({results['TON']['change']:+.1f}%)\n😱 Страх: {results['BTC']['fg_val']} ({results['BTC']['fg_text']})\n\n🔥 <b>ТОП-5 главных:</b>\n{news_block}\n⚡️ <b>Вывод:</b> {results['TON']['conclusion']}\n#утро #BTC #TON\n"""
+        news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
+        text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b> #ton\n💰 Рынок: BTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%) | TON ${results['TON']['price']:.2f}\n🧠 Страх: {results['BTC']['fg_val']} ({results['BTC']['fg_text']})\n🔥 <b>ТОП-5 главных:</b>\n{news_block}\n⚡️ Вывод: {results['TON']['conclusion']}\nНапиши тикер в чате для разбора 👇\n#утро #BTC #TON\n"""
     else:
-        news_block="".join([f'{i}. {icon_for(n["source"])} <a href="{n["url"]}">{n["title"][:80]}</a>\n' for i,n in enumerate(top5,1)])
-        text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>\n\n📊 <b>РЫНОК ЗА ДЕНЬ</b>\n├ BTC {results['BTC']['change']:+.1f}% {'🟢' if results['BTC']['change']>=0 else '🔴'} | ETH {results['ETH']['change']:+.1f}%\n└ TON {results['TON']['change']:+.1f}% {'🟢' if results['TON']['change']>=0 else '🔴'} — Индекс страха: {results['BTC']['fg_val']}\n\n📌 <b>Что случилось сегодня:</b>\n{news_block}\n🎯 <b>Итог:</b> День в боковике, завтра ждем волатильность. Завтра в 7:00 утренний дайджест.\n#вечер #TON\n"""
+        news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:80]}</a> [{n["source"]}]\n' for i,n in enumerate(top5,1)])
+        text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>\nЗа день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%\nИндекс страха: {results['BTC']['fg_val']}\n📌 <b>Что случилось сегодня:</b>\n{news_block}\nЗавтра в 7:00 утренний дайджест.\n#вечер #TON\n"""
     return text, top5
 
 async def send_digest(is_morning=True):
-    print(f"=== TRY SEND DIGEST morning={is_morning} CHAT={REPORT_CHAT_ID} ===")
-    if not REPORT_CHAT_ID:
-        print("!!! REPORT_CHAT_ID empty, abort")
-        return
     try:
         me=await bot.get_me()
         keyboard=InlineKeyboardMarkup(inline_keyboard=[
@@ -220,52 +210,33 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text="💬 Перейти в чат", url=CHAT_INVITE_LINK)]
         ])
         text, top5 = await build_digest(is_morning)
-
-        # 收集有效图片
         valid_images = [n["image"] for n in top5 if n.get("image") and n["image"].startswith("http")][:3]
-        print(f"Digest built, images={len(valid_images)} len={len(text)}")
 
         if not is_morning and valid_images:
-            # 晚报：发图文版
             try:
-                # 第一张带正文
                 await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=valid_images[0], caption=text, parse_mode="HTML", reply_markup=keyboard)
-                print(f"✅ EVENING PHOTO SENT")
-                # 如果还有多图，补一个相册
-                if len(valid_images) > 1:
-                    media = [InputMediaPhoto(media=url) for url in valid_images[1:3]]
+                if len(valid_images)>1:
+                    media=[InputMediaPhoto(media=u) for u in valid_images[1:]]
                     await bot.send_media_group(chat_id=int(REPORT_CHAT_ID), media=media)
-                    print(f"✅ EVENING ALBUM SENT")
                 return
             except Exception as e:
-                print(f"Photo send failed {e}, fallback to text")
+                print(f"Photo failed {e}, fallback to text")
 
-        # 早报或图片失败 -> 纯文字
-        if valid_images and valid_images[0].startswith("http"):
-            try:
-                await bot.send_photo(chat_id=int(REPORT_CHAT_ID), photo=valid_images[0], caption=text, parse_mode="HTML", reply_markup=keyboard)
-                print(f"✅ DIGEST PHOTO SENT")
-                return
-            except Exception as e:
-                print(f"Photo failed {e}")
-
-        await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=False, reply_markup=keyboard)
-        print(f"✅ DIGEST TEXT SENT to {REPORT_CHAT_ID}")
+        await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard)
     except Exception as e:
         print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
-    print("Scheduler started, waiting for 07:00 and 19:50 MSK")
+    print("Scheduler started, waiting for 07:00 and 19:00 MSK")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
             if now_msk.hour==7 and 0 <= now_msk.minute < 2:
                 if LAST_REPORTS["morning"]!=now_msk.date():
-                    print(f"Trigger morning {now_msk}")
                     await send_digest(True); LAST_REPORTS["morning"]=now_msk.date()
-            if now_msk.hour==19 and 50 <= now_msk.minute < 52:
+            # 晚报改回 19:00
+            if now_msk.hour==19 and 0 <= now_msk.minute < 2:
                 if LAST_REPORTS["evening"]!=now_msk.date():
-                    print(f"Trigger evening {now_msk}")
                     await send_digest(False); LAST_REPORTS["evening"]=now_msk.date()
             await asyncio.sleep(30)
         except Exception as e:
@@ -307,8 +278,7 @@ async def start(m:Message): await m.answer("Привет! Напиши тике�
 
 @dp.message(Command("report"))
 async def manual_report(m:Message):
-    print(f"/report from {m.from_user.id}")
-    await m.answer("Отправляю тест в канал...")
+    await m.answer("Отправляю вечерний с картинками...")
     await send_digest(False)
 
 @dp.message(Command("testalert"))
@@ -333,7 +303,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v23 evening with images 19:50'
+def home(): return 'ok v25 evening 19:00 with images'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
