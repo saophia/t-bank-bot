@@ -1,8 +1,16 @@
-import asyncio, aiohttp, os
-from aiogram import Bot, Dispatcher, types
+import os
+import asyncio
+import aiohttp
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
+from aiogram.types import Message
+from flask import Flask
+import threading
 
-TOKEN = os.environ.get("TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("BOT_TOKEN 没设置!")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 rate = 83.81
@@ -14,21 +22,31 @@ async def get_rate():
             async with session.get("https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub") as r:
                 j = await r.json()
                 rate = j['tether']['rub']
-    except: pass
+    except:
+        pass
 
 @dp.message(Command("start"))
-async def start(m: types.Message):
+async def start(m: Message):
     await get_rate()
-    await m.answer(f"🏦 Т-Банк USDT Курс\n\nАктуальный курс: 1 USDT = {rate:.2f} RUB\n\nНапиши сумму в RUB, например 10000\n✅ СБП без 115-ФЗ")
+    await m.answer(f"Bot 已启动! 当前 USDT ≈ {rate} RUB\n输入 /price 看价格")
 
-@dp.message()
-async def calc(m: types.Message):
+@dp.message(Command("price"))
+async def price(m: Message):
     await get_rate()
-    try:
-        num = float(m.text.replace(",",".").replace("₽","").split()[0])
-        await m.answer(f"💰 {num:.0f} RUB = {num/rate:.2f} USDT\nКурс {rate:.2f}")
-    except:
-        await m.answer(f"Курс: {rate:.2f} RUB")
+    await m.answer(f"USDT ≈ {rate} RUB")
 
-async def main(): await dp.start_polling(bot)
-asyncio.run(main())
+async def main():
+    await dp.start_polling(bot)
+
+# --- 让 Render 能检测到端口 ---
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return 'ok - bot running'
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
+if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
+    asyncio.run(main())
