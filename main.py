@@ -90,12 +90,12 @@ def format_text(symbol,a):
 Не фин. совет
 💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉 @tbank_usdt_bot"""
 
-# 新增：30秒后删除
 async def delete_after(msg: Message, delay: int):
     await asyncio.sleep(delay)
     try:
         await msg.delete()
-    except: pass
+    except:
+        pass
 
 async def handle_any(m:Message):
     try:
@@ -118,8 +118,8 @@ async def handle_any(m:Message):
                     f"⚠️ {sym.upper()} уже был 5 мин назад. Смотри выше 👆 (еще {remain//60}м {remain%60}с)",
                     reply_to_message_id=first_msg_id
                 )
-                # 30秒后自动删除这条提示
                 asyncio.create_task(delete_after(warn, 30))
+                asyncio.create_task(delete_after(m, 30))
                 return
         a=await get_analysis(sym)
         text=format_text(sym,a)
@@ -139,7 +139,7 @@ async def main(): await dp.start_polling(bot)
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v13 delete after 30s'
+def home(): return 'ok v14 delete both after 30s'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
