@@ -172,7 +172,17 @@ async def price_alert_loop():
                         if sym in LAST_ALERT and now-LAST_ALERT[sym]<ALERT_COOLDOWN: continue
                         LAST_ALERT[sym]=now
                         me=await bot.get_me()
-                        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"📊 Разбор {sym}", url=f"https://t.me/{me.username}?start={sym}")],[InlineKeyboardButton(text="💬 Обсудить в чате", url=CHAT_INVITE_LINK)]])
+                        # === 引流优化1：报警按钮 ===
+                        if change_5m > 0 or change_1h > 0:
+                            btn1_text = f"🚀 {sym} куда дальше? Разбор"
+                            btn2_text = f"💬 Лонговать {sym}? Чат"
+                        else:
+                            btn1_text = f"📉 {sym} где отскок? Разбор"
+                            btn2_text = f"💬 Сливать {sym}? Чат"
+                        kb=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text=btn1_text, url=f"https://t.me/{me.username}?start={sym}")],
+                            [InlineKeyboardButton(text=btn2_text, url=CHAT_INVITE_LINK)]
+                        ])
                         txt=f"""{should} | {datetime.now(MOSCOW_TZ).strftime('%H:%M МСК')}\n\n💰 Сейчас: ${price:,.4f}\n📈 5 мин: {change_5m:+.2f}%\n📈 1 час: {change_1h:+.2f}%\n\nЧто делать? Жми разбор 👇\n#{sym} #alert"""
                         try: await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=txt, parse_mode="HTML", reply_markup=kb)
                         except: pass
@@ -224,17 +234,23 @@ async def build_digest(is_morning=True):
         text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>\nЗа день: BTC {results['BTC']['change']:+.1f}% | ETH {results['ETH']['change']:+.1f}% | TON {results['TON']['change']:+.1f}%\nИндекс страха: {results['BTC']['fg_val']}\n📌 <b>Что случилось сегодня:</b>\n{news_block}\nЗавтра в 7:00 утренний дайджест.\n#вечер #TON\n"""
     return text, top5, results
 
-# === 唯一修改的地方：只发1张图，不发相册 ===
 async def send_digest(is_morning=True):
     try:
         me=await bot.get_me()
-        keyboard=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Разобрать монету", url=f"https://t.me/{me.username}?start=analyze")],
-            [InlineKeyboardButton(text="💬 Перейти в чат", url=CHAT_INVITE_LINK)]
-        ])
         text, top5, results = await build_digest(is_morning)
-        cover_bytes = None
+        # === 引流优化2：早晚报按钮 ===
+        btc_price = results['BTC']['price']
+        btc_change = results['BTC']['change']
+        if btc_change > 0:
+            btn_analyze_text = f"📈 BTC ${btc_price:,.0f} - до куда рост?"
+        else:
+            btn_analyze_text = f"📉 BTC ${btc_price:,.0f} - где дно?"
+        keyboard=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=btn_analyze_text, url=f"https://t.me/{me.username}?start=analyze")],
+            [InlineKeyboardButton(text="💬 Киты покупают? Смотри чат", url=CHAT_INVITE_LINK)]
+        ])
 
+        cover_bytes = None
         async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as sess:
             n = top5[0] if top5 else None
             if n and n.get("url"):
@@ -255,7 +271,7 @@ async def send_digest(is_morning=True):
         print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
-    print("Scheduler 07:00 and 19:00 MSK SINGLE IMAGE")
+    print("Scheduler 07:00 and 19:00 MSK SINGLE IMAGE + FUNNEL")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -313,10 +329,9 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v31 single image 07:00 19:00'
+def home(): return 'ok v32 single image + funnel buttons'
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
 if __name__=="__main__":
     threading.Thread(target=run_flask,daemon=True).start()
     asyncio.run(main())
-    
