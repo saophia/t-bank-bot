@@ -1,4 +1,4 @@
-import os, asyncio, aiohttp, random
+import os, asyncio, aiohttp, random, time
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -11,6 +11,10 @@ if not TOKEN:
     raise ValueError("BOT_TOKEN not set!")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# === 新增：5分钟缓存，只存 message_id ===
+CACHE = {} # {'eth': (timestamp, message_id)}
+CACHE_TTL = 300 # 5分钟
 
 def calc_rsi_fixed(prices, period=14):
     if len(prices) < period+1: return 50
@@ -94,9 +98,27 @@ async def handle_any(m:Message):
         if not txt: return
         sym=''.join(filter(str.isalnum,txt))[:10]
         if len(sym)<2: return
+
+        # === 新增逻辑：5分钟内重复查询 ===
+        key = sym.lower()
+        now = time.time()
+        if key in CACHE:
+            ts, first_msg_id = CACHE[key]
+            if now - ts < CACHE_TTL:
+                remain = int(CACHE_TTL - (now - ts))
+                # 直接回复第一条，手机点一下就能跳上去
+                await m.answer(
+                    f"⚠️ {sym.upper()} уже был 5 мин назад. Смотри выше 👆 (еще {remain//60}м {remain%60}с)",
+                    reply_to_message_id=first_msg_id
+                )
+                return
+        # === 结束新增 ===
+
         a=await get_analysis(sym)
         text=format_text(sym,a)
-        await m.answer(text,parse_mode="HTML",disable_web_page_preview=True)
+        sent = await m.answer(text,parse_mode="HTML",disable_web_page_preview=True)
+        # 存下第一条的ID
+        CACHE[key] = (now, sent.message_id)
     except Exception as e: print(f"handle error: {e}")
 
 @dp.message(Command("start"))
@@ -111,7 +133,7 @@ async def main(): await dp.start_polling(bot)
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v10 no buttons final'
+def home(): return 'ok v11 cache jump'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
