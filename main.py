@@ -12,9 +12,8 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# === 新增：5分钟缓存，只存 message_id ===
-CACHE = {} # {'eth': (timestamp, message_id)}
-CACHE_TTL = 300 # 5分钟
+CACHE = {}
+CACHE_TTL = 300
 
 def calc_rsi_fixed(prices, period=14):
     if len(prices) < period+1: return 50
@@ -93,31 +92,29 @@ def format_text(symbol,a):
 
 async def handle_any(m:Message):
     try:
-        if m.text and "Анализ" in m.text and "Курс T-Bank" in m.text: return
-        txt=(m.text or "").lower().strip().split()[0]
+        if m.from_user and m.from_user.is_bot:
+            return
+        txt_full = m.text or ""
+        if "Анализ" in txt_full or "уже был 5 мин" in txt_full or "Курс T-Bank" in txt_full:
+            return
+        txt=txt_full.lower().strip().split()[0]
         if not txt: return
         sym=''.join(filter(str.isalnum,txt))[:10]
         if len(sym)<2: return
-
-        # === 新增逻辑：5分钟内重复查询 ===
-        key = sym.lower()
+        key = (m.chat.id, sym.lower())
         now = time.time()
         if key in CACHE:
             ts, first_msg_id = CACHE[key]
             if now - ts < CACHE_TTL:
                 remain = int(CACHE_TTL - (now - ts))
-                # 直接回复第一条，手机点一下就能跳上去
                 await m.answer(
                     f"⚠️ {sym.upper()} уже был 5 мин назад. Смотри выше 👆 (еще {remain//60}м {remain%60}с)",
                     reply_to_message_id=first_msg_id
                 )
                 return
-        # === 结束新增 ===
-
         a=await get_analysis(sym)
         text=format_text(sym,a)
         sent = await m.answer(text,parse_mode="HTML",disable_web_page_preview=True)
-        # 存下第一条的ID
         CACHE[key] = (now, sent.message_id)
     except Exception as e: print(f"handle error: {e}")
 
@@ -133,7 +130,7 @@ async def main(): await dp.start_polling(bot)
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v11 cache jump'
+def home(): return 'ok v12 cache jump fix'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000))
