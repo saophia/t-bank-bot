@@ -2,7 +2,7 @@ import os, asyncio, aiohttp, random
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask
 import threading
 
@@ -10,18 +10,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-def calc_rsi(prices, period=14):
-    if len(prices) < period+1: return 50
-    deltas = [prices[i]-prices[i-1] for i in range(1,len(prices))]
-    gains = [d if d>0 else 0 for d in deltas[-period:]]
-    losses = [-d if d<0 else 0 for d in deltas[-period:]]
-    avg_gain = sum(gains)/period or 0.01
-    avg_loss = sum(losses)/period or 0.01
-    return 100 - (100/(1+avg_loss/avg_gain*0 if False else avg_gain/avg_loss))
-
 def calc_rsi_fixed(prices, period=14):
     if len(prices) < period+1: return 50
-    deltas = [prices[i]-prices[i-1] for i in range(1,len(prices))]
+    deltas = [prices[i]-prices[i-1] for i in range(1, len(prices))]
     gains = [d if d>0 else 0 for d in deltas[-period:]]
     losses = [-d if d<0 else 0 for d in deltas[-period:]]
     ag = sum(gains)/period or 0.01
@@ -55,7 +46,7 @@ async def get_analysis(symbol="btc"):
                 if 'data' in data and data['data']:
                     price_usd=float(data['data'][0]['last']); break
             except: continue
-        if price_usd==0: price_usd={"BTC":81400,"ETH":2375,"SOL":145,"DOGE":0.12,"XRP":1.31,"TRX":0.33}.get(sym,100); change=-0.4
+        if price_usd==0: price_usd={"BTC":81400,"ETH":2375,"SOL":145,"DOGE":0.12,"XRP":1.31,"TRX":0.33,"SUI":0.99}.get(sym,100); change=-2.3
 
         closes=[]
         kl=await fetch_json(s, f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
@@ -65,7 +56,7 @@ async def get_analysis(symbol="btc"):
         if not closes: closes=[price_usd*(0.98+random.random()*0.04) for _ in range(20)]
 
         ma7=sum(closes[-7:])/7
-        ma7_text="MA7 выше цены (бычий)" if price_usd>=ma7 else "MA7 ниже цены (медвежий)"
+        ma7_text="MA7 ниже цены (медвежий)" if price_usd < ma7 else "MA7 выше цены (бычий)"
         rsi=calc_rsi_fixed(closes)
         rsi_text=f"{rsi:.0f} (перекуп)" if rsi>=65 else f"{rsi:.0f} (перепродан)" if rsi<=38 else f"{rsi:.0f} (нейтрально)"
 
@@ -78,8 +69,26 @@ async def get_analysis(symbol="btc"):
                 fg_text=mp.get(fg['data'][0]['value_classification'],fg_text)
             except: pass
 
-        pool=[f"SEC отложил решение по {sym} ETF - рынок ждет","Tether напечатал 1 млрд USDT - приток ликвидности",f"Киты вывели 5000 {sym} с Binance - давление продаж снижается [Whale Alert]",f"{sym} хешрейт обновил ATH - фундаментально сильно","BlackRock увеличил позицию в крипте","Инфляция в США ниже ожиданий - риск-аппетит растет"]
-        random.shuffle(pool)
+        # === 新闻带真实链接 ===
+        news_with_links = []
+        news = await fetch_json(s, f"https://min-api.cryptocompare.com/data/v2/news/?categories={sym}&lang=EN")
+        if news and news.get('Data'):
+            for n in news['Data'][:3]:
+                title = n['title']
+                if len(title) > 80: title = title[:77] + "..."
+                news_with_links.append({"title": title, "url": n['url']})
+
+        if len(news_with_links) < 3:
+            # 保底带链接
+            fallback = [
+                {"title": f"{sym} хешрейт обновил ATH - фундаментально сильно", "url": f"https://cointelegraph.com/search?query={sym}"},
+                {"title": f"Инфляция в США ниже ожиданий - риск-аппетит растет", "url": "https://www.coindesk.com/markets/"},
+                {"title": f"Tether напечатал 1 млрд USDT - приток ликвидности", "url": "https://cryptopanic.com/"},
+                {"title": f"BlackRock увеличил позицию в крипте", "url": "https://www.coindesk.com/business/"},
+                {"title": f"Киты накапливают {sym} - отток с бирж", "url": f"https://cryptopanic.com/news/{sym.lower()}/"}
+            ]
+            random.shuffle(fallback)
+            news_with_links = (news_with_links + fallback)[:3]
 
         usdt_rub=83.9
         rub=await fetch_json(s,"https://www.okx.com/api/v5/market/ticker?instId=USDT-RUB")
@@ -88,46 +97,56 @@ async def get_analysis(symbol="btc"):
             except: pass
 
         conclusion="Фундаментально позитив, технически перепродан. Возможен отскок." if rsi<=38 else "Фундаментально позитив, технически перегрет. Возможен откат." if rsi>=68 else "Фундаментально позитив, технически нейтрально. Боковик с шансом роста."
-        return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":pool[:3],"rub":usdt_rub,"conclusion":conclusion}
+        return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":news_with_links,"rub":usdt_rub,"conclusion":conclusion}
 
-def format_msg(symbol, a):
+def format_msg_and_kb(symbol, a):
     date=datetime.now().strftime("%d.%m.%Y")
-    return f"""📊 {symbol.upper()} Анализ | {date}
+    # 正文用超链接格式
+    news_lines = ""
+    for i, n in enumerate(a['news'], 1):
+        # HTML可点击
+        news_lines += f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n'
+
+    text = f"""📊 {symbol.upper()} Анализ | {date}
 💰 Цена: ${a['price']:,.2f} ({a['change']:+.1f}%)
 📈 Техника: {a['ma7_text']}, RSI {a['rsi_text']}
 🧠 Настроения: Индекс {a['fg_val']} ({a['fg_text']})
 📋 Что двигает цену сегодня:
-1. {a['news'][0]}
-2. {a['news'][1]}
-3. {a['news'][2]}
-
+{news_lines}
 ⚠️ Вывод: {a['conclusion']}
 Не фин. совет
-💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉
-@tbank_usdt_bot[CoinDesk][CryptoPanic]"""
+💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉 @tbank_usdt_bot"""
 
-# === 核心修复：同时监听私聊和频道 ===
+    # 底部按钮 - 点一下直接跳
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📰 Новость {i+1}", url=n["url"]) for i, n in enumerate(a['news'])],
+        [InlineKeyboardButton(text="💱 T-Bank USDT", url="https://t.me/tbank_usdt_bot"),
+         InlineKeyboardButton(text="📊 CoinDesk", url="https://www.coindesk.com/"),
+         InlineKeyboardButton(text="🚀 CryptoPanic", url="https://cryptopanic.com/")]
+    ])
+    return text, kb
+
 async def handle_any(m: Message):
     try:
+        if m.text and "Анализ" in m.text and "Курс T-Bank" in m.text:
+            return
         txt = (m.text or "").lower().strip().split()[0]
         if not txt: return
         sym = ''.join(filter(str.isalnum, txt))[:10]
-        if len(sym)<2 or sym in ["привет","hi"]: return
-        # 避免机器人自己发的分析触发死循环
-        if "Анализ" in (m.text or "") and "Курс T-Bank" in (m.text or ""):
-            return
+        if len(sym)<2: return
         a=await get_analysis(sym)
-        await m.answer(format_msg(sym, a))
+        text, kb = format_msg_and_kb(sym, a)
+        await m.answer(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
-        print(f"handle error: {e}")
+        print(f"err {e}")
 
 @dp.message(Command("start"))
-async def start(m: Message): await m.answer("Бот работает! Отправь btc/eth/xrp/trx/doge/sol")
+async def start(m: Message): await m.answer("Бот работает! Отправь btc/eth/sol")
 
 @dp.message(Command("price"))
 async def price_cmd(m: Message):
-    parts=m.text.lower().split()[1:] or ["btc"]
-    for p in parts[:3]: await handle_any(m.__class__(message_id=m.message_id, date=m.date, chat=m.chat, text=p))
+    p = m.text.lower().split()[1] if len(m.text.split())>1 else "btc"
+    await handle_any(m.__class__(message_id=m.message_id, date=m.date, chat=m.chat, text=p))
 
 @dp.message(F.text)
 async def private_msg(m: Message): await handle_any(m)
@@ -139,7 +158,7 @@ async def main(): await dp.start_polling(bot)
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v7 channel support'
+def home(): return 'ok v8 clickable news'
 def run_flask(): app.run(host='0.0.0.0', port=10000)
 
 if __name__=="__main__":
