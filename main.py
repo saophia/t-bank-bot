@@ -48,43 +48,40 @@ async def fetch_json(session, url):
     except: pass
     return None
 
-# ===== 核心修复：价格OKX，涨跌CoinGecko，TON不再0.0% =====
+# ===== 1. 真实价格 - 修复 +0.1% 全一样 =====
 async def get_real_price(session, sym):
+    # 1. Binance 24hr 最准，自带真实涨跌
+    try:
+        bn = await fetch_json(session, f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT")
+        if not bn: 
+            bn = await fetch_json(session, f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
+        if bn and 'lastPrice' in bn:
+            return float(bn['lastPrice']), float(bn['priceChangePercent'])
+    except: pass
+    
+    # 2. OKX 价格 + CoinGecko 涨跌
     price = None
-    change = None
-    # 1. 价格用OKX - 最稳
     try:
         data = await fetch_json(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT")
-        if data and data.get('data') and data['data'][0].get('last'):
-            price = float(data['data'][0]['last'])
+        if data and data.get('data'):
+            price = float(data['data'][0].get('last') or 0)
     except: pass
 
-    # 2. 涨跌全部用CoinGecko - 解决TON 0.0%
     try:
         cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin","PEPE":"pepe","NOT":"notcoin","DOGS":"dogs"}
         cg_id = cg_map.get(sym, sym.lower())
         cg = await fetch_json(session, f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true")
         if cg and cg_id in cg:
-            if price is None:
-                price = float(cg[cg_id]['usd'])
-            change = float(cg[cg_id].get('usd_24h_change', 0))
-            if price and change is not None:
-                return price, change
+            p = float(cg[cg_id]['usd'])
+            c = float(cg[cg_id].get('usd_24h_change', 0))
+            return price or p, c
     except: pass
 
-    # 3. 最后备用 - OKX计算
-    if price and change is None:
-        try:
-            d2 = await fetch_json(session, f"https://www.okx.com/api/v5/market/24h-ticker?instId={sym}-USDT")
-            if d2 and d2.get('data'):
-                open24 = float(d2['data'][0].get('open24h') or 0)
-                if open24>0:
-                    return price, (price-open24)/open24*100
-        except: pass
-        return price, 0
+    if price and price>0:
+        return price, 0.0
+    return None, None
 
-    return price, change if change is not None else 0
-
+# ===== 2. 真实俄语加密新闻 =====
 async def get_top5_news():
     real_news = []
     crypto_keywords = ["биткоин","btc","эфир","eth","ton","крипт","блокчейн","токен","lisk","liquid","sol","doge","usdt","tether","binance","коин","майнинг","defi","etf"]
@@ -177,9 +174,9 @@ async def build_digest(is_morning=True):
         if p is None or p==0: return "загрузка..."
         return f"${p:,.0f} ({c:+.1f}%)" if abs(p)>10 else f"${p:.2f} ({c:+.1f}%)"
     def ch(sym): 
-        c=results[sym]['change']
-        # 保证TON不为0.0%
-        return f"{c:+.1f}%" if c!=0 else "+0.1%"
+        p=results[sym]['price']; c=results[sym]['change']
+        if p is None or p==0: return "0.0%"
+        return f"{c:+.1f}%"  # 真实涨跌，不再假+0.1%
     news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
     if is_morning:
         text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
@@ -243,7 +240,7 @@ async def price_alert_loop():
             except: await asyncio.sleep(60)
 
 async def scheduler_loop():
-    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | v34.4 TON FIX")
+    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | v34.5 REAL DIFF")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -309,7 +306,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v34.4 TON FIX REAL'
+def home(): return 'ok v34.5 REAL DIFF'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
