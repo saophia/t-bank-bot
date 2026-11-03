@@ -28,13 +28,19 @@ ALERT_COOLDOWN = 3600
 WATCH_LIST = ["BTC","ETH","TON","SOL","DOGE","PEPE","NOT","DOGS"]
 WELCOME_CACHE = {}
 
-WELCOME_TEXT = """👋 Добро пожаловать в канал!
-Ты подписался на навигатор, но вся движуха у нас в чате 👇
-💬 Киты пишут куда льют
-📈 Разборы по сигналу
-Жми и заходи: {chat_link}
-"""
+WELCOME_TEXT = """🐋 T-BANK | Чат Китов - Точные Сигналы
 
+📈 Что ты получаешь каждый день:
+💎 3-5 точных сигнала - вход, стоп, тейк
+💰 Прогноз по BTC, ETH, TON и топ-монетам
+🔥 Свежие новости + куда льют киты
+📊 Волновой анализ и разбор твоих сделок
+
+Тут не болтают. Тут зарабатывают.
+
+👇 Жми и заходи в чат китов:
+https://t.me/+QCwJQgsg9EliY2Qx
+"""
 def calc_rsi_fixed(prices, period=14):
     if len(prices) < period+1: return 50
     deltas = [prices[i]-prices[i-1] for i in range(1, len(prices))]
