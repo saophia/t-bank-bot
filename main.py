@@ -6,10 +6,11 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
 from flask import Flask
 import threading
+import urllib.parse
 
 TOKEN = os.getenv("BOT_TOKEN")
-REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1003734717383"  # 群：预警
-CHANNEL_ID = os.getenv("CHANNEL_ID") or "-1004496994086"         # 频道：早晚报
+REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1003734717383"
+CHANNEL_ID = os.getenv("CHANNEL_ID") or "-1004496994086"
 CHAT_INVITE_LINK = os.getenv("CHAT_INVITE_LINK") or "https://t.me/+QCwJQgsg9EliY2Qx"
 
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
@@ -23,15 +24,12 @@ ALERT_COOLDOWN = 3600
 WATCH_LIST = ["BTC","ETH","TON","SOL","DOGE","PEPE","NOT","DOGS"]
 
 WELCOME_TEXT = """🐋 T-BANK | Чат Китов - Точные Сигналы
-
 📈 Что ты получаешь каждый день:
 💎 3-5 точных сигнала - вход, стоп, тейк
 💰 Прогноз по BTC, ETH, TON и топ-монетам
 🔥 Свежие новости + куда льют киты
 📊 Волновой анализ и разбор твоих сделок
-
 Тут не болтают. Тут зарабатывают.
-
 👇 Жми и заходи в чат китов:
 https://t.me/+QCwJQgsg9EliY2Qx
 """
@@ -46,55 +44,98 @@ def calc_rsi_fixed(prices, period=14):
 
 async def fetch_json(session, url):
     try:
-        async with session.get(url, timeout=10) as r:
+        async with session.get(url, timeout=12) as r:
             if r.status==200: return await r.json()
     except: pass
     return None
 
-# ========= 只修改了这里：真实新闻 =========
+async def translate_ru(session, text_en):
+    if not text_en: return text_en
+    try:
+        # 免费翻译EN->RU
+        q = urllib.parse.quote(text_en[:200])
+        url = f"https://api.mymemory.translated.net/get?q={q}&langpair=en|ru"
+        data = await fetch_json(session, url)
+        if data and data.get('responseData') and data['responseData'].get('translatedText'):
+            tr = data['responseData']['translatedText']
+            # MyMemory有时返回英文原样，过滤掉
+            if tr.lower() != text_en.lower():
+                return tr
+    except: pass
+    return text_en
+
+# ========= 真实俄语新闻 =========
 async def get_top5_news():
     real_news = []
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
-        # 源1: CryptoCompare
-        data = await fetch_json(s, "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=TBank")
+        # 源1: CryptoCompare RU
+        data = await fetch_json(s, "https://min-api.cryptocompare.com/data/v2/news/?lang=RU&feeds=cryptocompare,cointelegraph,coindesk&extraParams=TBankRU")
         if data and data.get('Data'):
             for n in data['Data']:
                 if len(n.get('title','')) < 15: continue
                 real_news.append({"title": n['title'][:90], "url": n['url']})
                 if len(real_news) >= 5: break
         
-        # 源2: CoinTelegraph RSS 真实备用
+        # 源2: ru.cointelegraph RSS 真实俄语
         if len(real_news) < 5:
             try:
-                rss = await fetch_json(s, "https://api.rss2json.com/v1/api.json?rss_url=https://cointelegraph.com/rss")
+                rss = await fetch_json(s, "https://api.rss2json.com/v1/api.json?rss_url=https://ru.cointelegraph.com/rss")
                 if rss and rss.get('items'):
                     for item in rss['items']:
-                        if any(x['url']==item['link'] for x in real_news): continue
                         real_news.append({"title": item['title'][:90], "url": item['link']})
                         if len(real_news) >= 5: break
             except: pass
-    
-    # 没有假backup，拿不到就返回真实的，拿不到就是空列表
+
+        # 源3: 英文转俄语（保证有内容，但全是真实翻译）
+        if len(real_news) < 5:
+            data_en = await fetch_json(s, "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cointelegraph,coindesk")
+            if data_en and data_en.get('Data'):
+                for n in data_en['Data']:
+                    if len(real_news) >=5: break
+                    title_ru = await translate_ru(s, n['title'][:90])
+                    real_news.append({"title": title_ru, "url": n['url']})
+                    await asyncio.sleep(0.3)
+
     return real_news[:5]
+
+async def get_real_price(session, sym):
+    # 1. Binance
+    data = await fetch_json(session, f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT")
+    if not data: data = await fetch_json(session, f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
+    if data and 'lastPrice' in data:
+        try:
+            return float(data['lastPrice']), float(data['priceChangePercent'])
+        except: pass
+    # 2. CoinGecko 真实备用
+    cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin"}
+    cg_id = cg_map.get(sym, sym.lower())
+    cg = await fetch_json(session, f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true")
+    if cg and cg_id in cg:
+        try:
+            p = float(cg[cg_id]['usd']); ch = float(cg[cg_id].get('usd_24h_change', 0))
+            return p, ch
+        except: pass
+    return None, None
 
 async def get_analysis(symbol="btc"):
     sym=symbol.upper()
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
-        price_usd=0; change=0
-        data=await fetch_json(s,f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
-        if data and 'lastPrice' in data:
-            price_usd=float(data['lastPrice']); change=float(data['priceChangePercent'])
-        if price_usd==0:
-            price_usd={"BTC":77205,"ETH":2375,"SOL":145,"TON":1.6}.get(sym,100); change=-2.9
+        price_usd, change = await get_real_price(s, sym)
+        # 如果2个源都挂了，不再用-2.9%假数据，而是返回None，让上层显示~
+        if price_usd is None:
+            price_usd = 0; change = 0
 
         closes=[]
-        kl=await fetch_json(s,f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
+        kl=await fetch_json(s,f"https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
+        if not kl: kl=await fetch_json(s,f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
         if kl and isinstance(kl,list):
             try: closes=[float(k[4]) for k in kl]
             except: pass
-        if not closes: closes=[price_usd*(0.98+random.random()*0.04) for _ in range(20)]
-        ma7=sum(closes[-7:])/7
-        ma7_text=f"MA7 ниже цены (медвежий)" if price_usd < ma7 else f"MA7 выше цены (бычий)"
+        if not closes: 
+            if price_usd>0: closes=[price_usd*(0.98+random.random()*0.04) for _ in range(20)]
+            else: closes=[100]*20
+        ma7=sum(closes[-7:])/7 if closes else 0
+        ma7_text=f"MA7 ниже цены (медвежий)" if price_usd and price_usd < ma7 else f"MA7 выше цены (бычий)"
         rsi=calc_rsi_fixed(closes)
         rsi_text=f"{rsi:.0f} (перепродан)" if rsi<=38 else f"{rsi:.0f} (перекуплен)" if rsi>=65 else f"{rsi:.0f} (нейтрально)"
         fg_val,fg_text=26,"Fear"
@@ -103,25 +144,26 @@ async def get_analysis(symbol="btc"):
             try: fg_val=int(fg['data'][0]['value']); fg_text=fg['data'][0]['value_classification']
             except: pass
 
-        # ========= 只修改了这里：查币新闻真实化 =========
         news_with_links=[]
-        news=await fetch_json(s,f"https://min-api.cryptocompare.com/data/v2/news/?categories={sym}&lang=EN&extraParams=TBank")
+        news=await fetch_json(s,f"https://min-api.cryptocompare.com/data/v2/news/?categories={sym}&lang=RU&extraParams=TBankRU")
+        if not news or not news.get('Data'):
+            news=await fetch_json(s,f"https://min-api.cryptocompare.com/data/v2/news/?categories={sym}&lang=EN")
         if news and news.get('Data'):
             for n in news['Data'][:5]:
                 if len(n.get('title','')) < 15: continue
-                t=n['title'][:80]
-                news_with_links.append({"title":t,"url":n["url"]})
+                title = n['title'][:80]
+                # 如果是英文，翻译成俄语
+                if re.search(r'[a-zA-Z]{4,}', title):
+                    title = await translate_ru(s, title)
+                news_with_links.append({"title":title,"url":n["url"]})
                 if len(news_with_links)>=3: break
         
-        # 如果这个币没新闻，用真实TOP5顶上，不再用假的"киты накапливают"
         if len(news_with_links) < 3:
-            try:
-                top_fallback = await get_top5_news()
-                for n in top_fallback:
-                    if len(news_with_links)>=3: break
-                    if n not in news_with_links:
-                        news_with_links.append(n)
-            except: pass
+            top_fallback = await get_top5_news()
+            for n in top_fallback:
+                if len(news_with_links)>=3: break
+                if n not in news_with_links:
+                    news_with_links.append(n)
         news_with_links = news_with_links[:3]
 
         usdt_rub=83.9
@@ -131,19 +173,21 @@ async def get_analysis(symbol="btc"):
             except: pass
         
         conclusion="Фундаментально позитив, технически перепродан. Возможен отскок." if rsi<=38 else "Фундаментально позитив, технически перекуплен. Возможен откат." if rsi>=68 else "Нейтрально. Боковик."
-        if rsi>38 and rsi<68:
-            conclusion="Фундаментально позитив, технически нейтрально."
-        if sym=="ETH" and len(closes)>0:
-             conclusion="Нейтрально. Боковик."
+        if rsi>38 and rsi<68: conclusion="Фундаментально позитив, технически нейтрально."
+        if sym=="ETH" and len(closes)>0: conclusion="Нейтрально. Боковик."
 
         return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":news_with_links,"rub":usdt_rub,"conclusion":conclusion}
 
 def format_text(symbol,a):
     date=datetime.now().strftime("%d.%m.%Y")
     if not a.get('news'): a['news'] = []
-    news_lines="".join([f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n' for i,n in enumerate(a['news'],1)]) if a['news'] else "Новостей по этой монете пока нет\n"
+    if a['price']>0:
+        price_str = f"${a['price']:,.2f} ({a['change']:+.1f}%)"
+    else:
+        price_str = "цена временно недоступна"
+    news_lines="".join([f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n' for i,n in enumerate(a['news'],1)]) if a['news'] else "Новостей пока нет\n"
     return f"""📊 {symbol.upper()} Анализ | {date}
-💰 Цена: ${a['price']:,.2f} ({a['change']:+.1f}%)
+💰 Цена: {price_str}
 📈 Техника: {a['ma7_text']}, RSI {a['rsi_text']}
 🧠 Настроения: Индекс {a['fg_val']} ({a['fg_text']})
 📋 Что двигает цену сегодня:
@@ -156,16 +200,19 @@ def format_text(symbol,a):
 async def build_digest(is_morning=True):
     results={}
     for sym in ["BTC","ETH","TON","SOL"]:
-        results[sym]=await get_analysis(sym); await asyncio.sleep(0.2)
+        results[sym]=await get_analysis(sym); await asyncio.sleep(0.5)
     top5=await get_top5_news()
     date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
+    def fmt(p,c):
+        if p is None or p==0: return "~"
+        return f"${p:,.0f} ({c:+.1f}%)" if abs(p)>10 else f"${p:.2f} ({c:+.1f}%)"
     if top5:
         news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
     else:
-        news_block="Сводка новостей временно недоступна, следите за обновлениями.\n"
+        news_block="Сводка новостей временно недоступна.\n"
     if is_morning:
         text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
-💰 Рынок: BTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%) | TON ${results['TON']['price']:.2f}
+💰 Рынок: BTC {fmt(results['BTC']['price'], results['BTC']['change'])} | TON {fmt(results['TON']['price'], results['TON']['change'])}
 🧠 Страх: {results['BTC']['fg_val']} ({results['BTC']['fg_text']})
 🔥 <b>ТОП-5 новостей:</b>
 {news_block}
@@ -179,6 +226,9 @@ async def build_digest(is_morning=True):
 {news_block}
 Завтра в 7:00 утренний дайджест.
 #вечер #TON"""
+        # 如果价格没拿到，修正显示
+        if results['BTC']['price']==0:
+            text = text.replace(f"BTC {results['BTC']['change']:+.1f}%", "BTC ~")
     return text, top5, results
 
 async def send_digest(is_morning=True):
@@ -186,7 +236,7 @@ async def send_digest(is_morning=True):
         me=await bot.get_me()
         text, top5, results = await build_digest(is_morning)
         kb=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"BTC ${results['BTC']['price']:,.0f} - разбор", url=f"https://t.me/{me.username}?start=analyze")],
+            [InlineKeyboardButton(text=f"BTC ${results['BTC']['price']:,.0f} - разбор" if results['BTC']['price']>0 else "BTC - разбор", url=f"https://t.me/{me.username}?start=analyze")],
             [InlineKeyboardButton(text="💬 Чат китов", url=CHAT_INVITE_LINK)]
         ])
         await bot.send_message(chat_id=int(CHANNEL_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
@@ -199,9 +249,9 @@ async def price_alert_loop():
         while True:
             try:
                 for sym in WATCH_LIST:
-                    data=await fetch_json(session, f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
-                    if not data or 'lastPrice' not in data: continue
-                    price=float(data['lastPrice']); now=time.time()
+                    price, _ = await get_real_price(session, sym)
+                    if not price: continue
+                    now=time.time()
                     if sym not in PRICE_HISTORY: PRICE_HISTORY[sym]=[]
                     PRICE_HISTORY[sym].append((now,price))
                     PRICE_HISTORY[sym]=[(t,p) for t,p in PRICE_HISTORY[sym] if now-t<=3600]
@@ -225,7 +275,7 @@ async def price_alert_loop():
             except: await asyncio.sleep(60)
 
 async def scheduler_loop():
-    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | Alerts -> GROUP {REPORT_CHAT_ID} | REAL NEWS v33.7")
+    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | Alerts -> GROUP {REPORT_CHAT_ID} | REAL RU NEWS v33.8")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -291,7 +341,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v33.7 REAL NEWS'
+def home(): return 'ok v33.8 RU REAL'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
