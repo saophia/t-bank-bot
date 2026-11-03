@@ -9,7 +9,7 @@ import threading
 
 TOKEN = os.getenv("BOT_TOKEN")
 REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1003734717383"  # 群：预警
-CHANNEL_ID = os.getenv("CHANNEL_ID") or "-1004496994086"         # 频道：早晚报 <- 新增
+CHANNEL_ID = os.getenv("CHANNEL_ID") or "-1004496994086"         # 频道：早晚报
 CHAT_INVITE_LINK = os.getenv("CHAT_INVITE_LINK") or "https://t.me/+QCwJQgsg9EliY2Qx"
 
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
@@ -51,23 +51,31 @@ async def fetch_json(session, url):
     except: pass
     return None
 
+# ========= 只修改了这里：真实新闻 =========
 async def get_top5_news():
-    backup = [
-        {"title":"BTC удержался выше $77k, киты покупают","url":"https://cointelegraph.com"},
-        {"title":"TON держит базу $1.58-1.64 на фоне падения альтов","url":"https://ton.org"},
-        {"title":"ETF на Bitcoin зафиксировали приток","url":"https://www.coindesk.com"},
-        {"title":"FED намекнул на снижение ставки","url":"https://cointelegraph.com"},
-        {"title":"Киты перевели 1 млрд USDT на биржи","url":"https://cryptopanic.com"},
-    ]
+    real_news = []
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
-        data=await fetch_json(s,"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk")
-        raw=[]
+        # 源1: CryptoCompare
+        data = await fetch_json(s, "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&feeds=cryptocompare,cointelegraph,coindesk&extraParams=TBank")
         if data and data.get('Data'):
-            for n in data['Data'][:10]:
-                if len(n['title'])<20: continue
-                raw.append({"title":n['title'][:85],"url":n['url']})
-                if len(raw)>=5: break
-        return raw if raw else backup
+            for n in data['Data']:
+                if len(n.get('title','')) < 15: continue
+                real_news.append({"title": n['title'][:90], "url": n['url']})
+                if len(real_news) >= 5: break
+        
+        # 源2: CoinTelegraph RSS 真实备用
+        if len(real_news) < 5:
+            try:
+                rss = await fetch_json(s, "https://api.rss2json.com/v1/api.json?rss_url=https://cointelegraph.com/rss")
+                if rss and rss.get('items'):
+                    for item in rss['items']:
+                        if any(x['url']==item['link'] for x in real_news): continue
+                        real_news.append({"title": item['title'][:90], "url": item['link']})
+                        if len(real_news) >= 5: break
+            except: pass
+    
+    # 没有假backup，拿不到就返回真实的，拿不到就是空列表
+    return real_news[:5]
 
 async def get_analysis(symbol="btc"):
     sym=symbol.upper()
@@ -95,20 +103,26 @@ async def get_analysis(symbol="btc"):
             try: fg_val=int(fg['data'][0]['value']); fg_text=fg['data'][0]['value_classification']
             except: pass
 
+        # ========= 只修改了这里：查币新闻真实化 =========
         news_with_links=[]
-        news=await fetch_json(s,f"https://min-api.cryptocompare.com/data/v2/news/?categories={sym}&lang=EN")
+        news=await fetch_json(s,f"https://min-api.cryptocompare.com/data/v2/news/?categories={sym}&lang=EN&extraParams=TBank")
         if news and news.get('Data'):
-            for n in news['Data'][:3]:
-                t=n['title'][:77]+"..." if len(n['title'])>80 else n['title']
+            for n in news['Data'][:5]:
+                if len(n.get('title','')) < 15: continue
+                t=n['title'][:80]
                 news_with_links.append({"title":t,"url":n["url"]})
+                if len(news_with_links)>=3: break
         
+        # 如果这个币没新闻，用真实TOP5顶上，不再用假的"киты накапливают"
         if len(news_with_links) < 3:
-            fallback=[
-                {"title":f"{sym} киты накапливают, отток с бирж растет","url":"https://cointelegraph.com"},
-                {"title":"Инфляция в США ниже ожиданий, риск-аппетит растет","url":"https://www.coindesk.com"},
-                {"title":"Tether напечатал 1 млрд USDT, ликвидность растет","url":"https://cryptopanic.com/"}
-            ]
-            news_with_links = (news_with_links + fallback)[:3]
+            try:
+                top_fallback = await get_top5_news()
+                for n in top_fallback:
+                    if len(news_with_links)>=3: break
+                    if n not in news_with_links:
+                        news_with_links.append(n)
+            except: pass
+        news_with_links = news_with_links[:3]
 
         usdt_rub=83.9
         rub=await fetch_json(s,"https://www.okx.com/api/v5/market/ticker?instId=USDT-RUB")
@@ -126,8 +140,8 @@ async def get_analysis(symbol="btc"):
 
 def format_text(symbol,a):
     date=datetime.now().strftime("%d.%m.%Y")
-    if not a.get('news'): a['news'] = [{"title":"Киты накапливают","url":"https://cointelegraph.com"}]*3
-    news_lines="".join([f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n' for i,n in enumerate(a['news'],1)])
+    if not a.get('news'): a['news'] = []
+    news_lines="".join([f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n' for i,n in enumerate(a['news'],1)]) if a['news'] else "Новостей по этой монете пока нет\n"
     return f"""📊 {symbol.upper()} Анализ | {date}
 💰 Цена: ${a['price']:,.2f} ({a['change']:+.1f}%)
 📈 Техника: {a['ma7_text']}, RSI {a['rsi_text']}
@@ -145,7 +159,10 @@ async def build_digest(is_morning=True):
         results[sym]=await get_analysis(sym); await asyncio.sleep(0.2)
     top5=await get_top5_news()
     date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
-    news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
+    if top5:
+        news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
+    else:
+        news_block="Сводка новостей временно недоступна, следите за обновлениями.\n"
     if is_morning:
         text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
 💰 Рынок: BTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%) | TON ${results['TON']['price']:.2f}
@@ -172,7 +189,6 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text=f"BTC ${results['BTC']['price']:,.0f} - разбор", url=f"https://t.me/{me.username}?start=analyze")],
             [InlineKeyboardButton(text="💬 Чат китов", url=CHAT_INVITE_LINK)]
         ])
-        # 关键修改：发到频道，不再是群
         await bot.send_message(chat_id=int(CHANNEL_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
         print(f"✅ Digest sent to CHANNEL {CHANNEL_ID}")
     except Exception as e: print(f"❌ DIGEST FAILED: {e}")
@@ -209,7 +225,7 @@ async def price_alert_loop():
             except: await asyncio.sleep(60)
 
 async def scheduler_loop():
-    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | Alerts -> GROUP {REPORT_CHAT_ID}")
+    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | Alerts -> GROUP {REPORT_CHAT_ID} | REAL NEWS v33.7")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -275,7 +291,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v33.6 DUAL ID'
+def home(): return 'ok v33.7 REAL NEWS'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
