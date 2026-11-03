@@ -14,8 +14,9 @@ except:
     HAS_PIL = False
 
 TOKEN = os.getenv("BOT_TOKEN")
-REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1004496994086"
-CHAT_INVITE_LINK = "https://t.me/+emuZSO-ueBxlN2Ix"
+REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1003734717383"
+CHAT_INVITE_LINK = os.getenv("CHAT_INVITE_LINK") or "https://t.me/+QCwJQgsg9EliY2Qx"
+
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
 
 bot = Bot(token=TOKEN)
@@ -95,8 +96,7 @@ async def get_analysis(symbol="btc"):
                 news_with_links.append({"title":t,"url":n["url"]})
         if len(news_with_links)<3:
             fallback=[{"title":f"{sym} хешрейт обновил ATH","url":"https://cointelegraph.com"},{"title":"Инфляция в США ниже ожиданий","url":"https://www.coindesk.com"},{"title":"Tether напечатал 1 млрд USDT","url":"https://cryptopanic.com/"}]
-            news_with_links=(news_with_links+fallback)[:3
-]
+            news_with_links=(news_with_links+fallback)[:3]
         usdt_rub=83.9
         rub=await fetch_json(s,"https://www.okx.com/api/v5/market/ticker?instId=USDT-RUB")
         if rub and rub.get('data'):
@@ -130,38 +130,26 @@ async def price_alert_loop():
                         LAST_ALERT[sym]=now
                         me=await bot.get_me()
                         kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{sym} Analysis", url=f"https://t.me/{me.username}?start={sym}")],[InlineKeyboardButton(text="Chat", url=CHAT_INVITE_LINK)]])
-                        txt=f"{should}\n${price:,.4f} {change_5m:+.2f}% 5m"
+                        txt=f"{should} | {datetime.now(MOSCOW_TZ).strftime('%H:%M')}\n${price:,.4f} {change_5m:+.2f}% 5m"
                         try: await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=txt, reply_markup=kb)
                         except: pass
                 await asyncio.sleep(60)
             except: await asyncio.sleep(60)
 
-async def get_top5_news():
-    backup=[{"title":"BTC holds above $80k","url":"https://cointelegraph.com","source":"BTC"}]
-    async with aiohttp.ClientSession() as s:
-        data=await fetch_json(s,"https://min-api.cryptocompare.com/data/v2/news/?lang=EN")
-        raw=[]
-        if data and data.get('Data'):
-            for n in data['Data'][:5]: raw.append({"title":n['title'],"url":n['url'],"source":"Crypto"})
-        if not raw: raw=backup
-        return raw[:5]
-
 async def build_digest(is_morning=True):
     results={}
     for sym in ["BTC","ETH","TON","SOL"]:
         results[sym]=await get_analysis(sym); await asyncio.sleep(0.2)
-    top5=await get_top5_news()
     date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
-    news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
-    text=f"{'☀️ MORNING' if is_morning else '🌙 EVENING'} {date}\nBTC ${results['BTC']['price']:,.0f}\n{news_block}\n"
-    return text, top5, results
+    text=f"{'☀️ MORNING' if is_morning else '🌙 EVENING'} {date}\nBTC ${results['BTC']['price']:,.0f} ({results['BTC']['change']:+.1f}%)\nFear {results['BTC']['fg_val']}\n"
+    return text, [], results
 
 async def send_digest(is_morning=True):
     try:
         me=await bot.get_me()
         text, top5, results = await build_digest(is_morning)
         kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"BTC ${results['BTC']['price']:,.0f}", url=f"https://t.me/{me.username}?start=analyze")],[InlineKeyboardButton(text="Chat", url=CHAT_INVITE_LINK)]])
-        await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
+        await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", reply_markup=kb)
     except Exception as e: print(f"DIGEST FAILED: {e}")
 
 async def scheduler_loop():
@@ -227,7 +215,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v33.2 full analysis restored'
+def home(): return 'ok v33.3 Gate'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
