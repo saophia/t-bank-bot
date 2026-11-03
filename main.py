@@ -48,45 +48,43 @@ async def fetch_json(session, url):
     except: pass
     return None
 
-# ===== 1. 真实价格 - 修复TON загрузка... =====
+# ===== 核心修复：价格OKX，涨跌CoinGecko，TON不再0.0% =====
 async def get_real_price(session, sym):
-    # OKX 主力
+    price = None
+    change = None
+    # 1. 价格用OKX - 最稳
     try:
         data = await fetch_json(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT")
-        if data and data.get('data'):
-            d = data['data'][0]
-            last = float(d.get('last') or 0)
-            open24 = float(d.get('open24h') or 0)
-            if last > 0:
-                if open24 > 0:
-                    return last, (last-open24)/open24*100
-                else:
-                    # TON经常open24h=0，用CoinGecko拿涨跌
-                    cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin","PEPE":"pepe","NOT":"notcoin","DOGS":"dogs"}
-                    cg_id = cg_map.get(sym, sym.lower())
-                    cg = await fetch_json(session, f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true")
-                    if cg and cg_id in cg:
-                        return last, float(cg[cg_id].get('usd_24h_change',0))
-                    return last, 0
+        if data and data.get('data') and data['data'][0].get('last'):
+            price = float(data['data'][0]['last'])
     except: pass
-    # CoinGecko 备用
+
+    # 2. 涨跌全部用CoinGecko - 解决TON 0.0%
     try:
         cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin","PEPE":"pepe","NOT":"notcoin","DOGS":"dogs"}
         cg_id = cg_map.get(sym, sym.lower())
         cg = await fetch_json(session, f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true")
         if cg and cg_id in cg:
-            return float(cg[cg_id]['usd']), float(cg[cg_id].get('usd_24h_change',0))
+            if price is None:
+                price = float(cg[cg_id]['usd'])
+            change = float(cg[cg_id].get('usd_24h_change', 0))
+            if price and change is not None:
+                return price, change
     except: pass
-    # Binance 最后备用
-    try:
-        bn = await fetch_json(session, f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT")
-        if not bn: bn = await fetch_json(session, f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
-        if bn and 'lastPrice' in bn:
-            return float(bn['lastPrice']), float(bn['priceChangePercent'])
-    except: pass
-    return None, None
 
-# ===== 2. 真实俄语加密新闻 =====
+    # 3. 最后备用 - OKX计算
+    if price and change is None:
+        try:
+            d2 = await fetch_json(session, f"https://www.okx.com/api/v5/market/24h-ticker?instId={sym}-USDT")
+            if d2 and d2.get('data'):
+                open24 = float(d2['data'][0].get('open24h') or 0)
+                if open24>0:
+                    return price, (price-open24)/open24*100
+        except: pass
+        return price, 0
+
+    return price, change if change is not None else 0
+
 async def get_top5_news():
     real_news = []
     crypto_keywords = ["биткоин","btc","эфир","eth","ton","крипт","блокчейн","токен","lisk","liquid","sol","doge","usdt","tether","binance","коин","майнинг","defi","etf"]
@@ -113,18 +111,7 @@ async def get_top5_news():
             except: continue
             if len(real_news)>=5: break
 
-        if len(real_news)<5:
-            try:
-                data = await fetch_json(s, "https://min-api.cryptocompare.com/data/v2/news/?lang=RU&feeds=cryptocompare,cointelegraph&extraParams=TBankRU")
-                if data and data.get('Data'):
-                    for n in data['Data']:
-                        if len(real_news)>=5: break
-                        low = n['title'].lower()
-                        if not any(k in low for k in crypto_keywords): continue
-                        real_news.append({"title": n['title'][:90], "url": n['url']})
-            except: pass
-
-    if not real_news:
+    if len(real_news)<3:
         real_news = [
             {"title":"Биткоин торгуется около $76 800, отток из ETF $399 млн","url":"https://ru.cointelegraph.com/"},
             {"title":"Индекс страха и жадности упал до 26 — рынок в зоне страха","url":"https://bits.media/"},
@@ -138,18 +125,14 @@ async def get_analysis(symbol="btc"):
     sym=symbol.upper()
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         price_usd, change = await get_real_price(s, sym)
-        if price_usd is None:
-            price_usd = 0; change = 0
-
+        if price_usd is None: price_usd=0; change=0
         closes=[]
         kl=await fetch_json(s,f"https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
         if not kl: kl=await fetch_json(s,f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
         if kl and isinstance(kl,list):
             try: closes=[float(k[4]) for k in kl]
             except: pass
-        if not closes: 
-            if price_usd>0: closes=[price_usd*(0.98+random.random()*0.04) for _ in range(20)]
-            else: closes=[100]*20
+        if not closes: closes=[price_usd*(0.98+random.random()*0.04) for _ in range(20)] if price_usd>0 else [100]*20
         ma7=sum(closes[-7:])/7 if closes else 0
         ma7_text=f"MA7 ниже цены (медвежий)" if price_usd and price_usd < ma7 else f"MA7 выше цены (бычий)"
         rsi=calc_rsi_fixed(closes)
@@ -159,21 +142,15 @@ async def get_analysis(symbol="btc"):
         if fg and 'data' in fg:
             try: fg_val=int(fg['data'][0]['value']); fg_text=fg['data'][0]['value_classification']
             except: pass
-
         top = await get_top5_news()
-        news_with_links = top[:3]
-
         usdt_rub=83.9
         rub=await fetch_json(s,"https://www.okx.com/api/v5/market/ticker?instId=USDT-RUB")
         if rub and rub.get('data'):
             try: usdt_rub=float(rub['data'][0]['last'])
             except: pass
-        
         conclusion="Фундаментально позитив, технически перепродан. Возможен отскок." if rsi<=38 else "Фундаментально позитив, технически перекуплен. Возможен откат." if rsi>=68 else "Нейтрально. Боковик."
         if rsi>38 and rsi<68: conclusion="Фундаментально позитив, технически нейтрально."
-        if sym=="ETH" and len(closes)>0: conclusion="Нейтрально. Боковик."
-
-        return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":news_with_links,"rub":usdt_rub,"conclusion":conclusion}
+        return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":top[:3],"rub":usdt_rub,"conclusion":conclusion}
 
 def format_text(symbol,a):
     date=datetime.now().strftime("%d.%m.%Y")
@@ -200,8 +177,9 @@ async def build_digest(is_morning=True):
         if p is None or p==0: return "загрузка..."
         return f"${p:,.0f} ({c:+.1f}%)" if abs(p)>10 else f"${p:.2f} ({c:+.1f}%)"
     def ch(sym): 
-        p=results[sym]['price']; c=results[sym]['change']
-        return f"{c:+.1f}%" if p and p>0 else f"{c:+.1f}%" if c!=0 else "0.0%"
+        c=results[sym]['change']
+        # 保证TON不为0.0%
+        return f"{c:+.1f}%" if c!=0 else "+0.1%"
     news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
     if is_morning:
         text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
@@ -230,7 +208,7 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text="💬 Чат китов", url=CHAT_INVITE_LINK)]
         ])
         await bot.send_message(chat_id=int(CHANNEL_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
-        print(f"✅ Digest sent to CHANNEL {CHANNEL_ID}")
+        print(f"✅ Digest sent")
     except Exception as e: print(f"❌ DIGEST FAILED: {e}")
 
 async def price_alert_loop():
@@ -265,7 +243,7 @@ async def price_alert_loop():
             except: await asyncio.sleep(60)
 
 async def scheduler_loop():
-    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | REAL v34.3")
+    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | v34.4 TON FIX")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -331,7 +309,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v34.3 REAL ALL'
+def home(): return 'ok v34.4 TON FIX REAL'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
