@@ -39,7 +39,7 @@ WELCOME_TEXT = """🐋 T-BANK | Чат Китов - Точные Сигналы
 Тут не болтают. Тут зарабатывают.
 
 👇 Жми и заходи в чат китов:
-https://t.me/+QCwJQgsg9EliY2Qx
+https://t.me/+a34Ns_or_IU5NmJh
 """
 def calc_rsi_fixed(prices, period=14):
     if len(prices) < period+1: return 50
