@@ -48,44 +48,43 @@ async def fetch_json(session, url):
     except: pass
     return None
 
-# ===== 1. 真实价格 - 修复 +0.1% 全一样 =====
+# ===== 1. 彻底修复 0.0% - 只用OKX自己算涨跌 =====
 async def get_real_price(session, sym):
-    # 1. Binance 24hr 最准，自带真实涨跌
-    try:
-        bn = await fetch_json(session, f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT")
-        if not bn: 
-            bn = await fetch_json(session, f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
-        if bn and 'lastPrice' in bn:
-            return float(bn['lastPrice']), float(bn['priceChangePercent'])
-    except: pass
-    
-    # 2. OKX 价格 + CoinGecko 涨跌
-    price = None
+    # OKX ticker 拿现价和open24h
     try:
         data = await fetch_json(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT")
         if data and data.get('data'):
-            price = float(data['data'][0].get('last') or 0)
+            d = data['data'][0]
+            last = float(d.get('last') or 0)
+            open24 = float(d.get('open24h') or 0)
+            if last > 0 and open24 > 0:
+                return last, (last - open24) / open24 * 100
+            if last > 0:
+                # open24h为空的币 (TON经常这样) 用1H K线自己算24h涨跌
+                candles = await fetch_json(session, f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1H&limit=24")
+                if candles and candles.get('data') and len(candles['data']) >= 2:
+                    # OKX candles: [ts, o, h, l, c...] 最新在前
+                    newest_close = float(candles['data'][0][4])
+                    oldest_open = float(candles['data'][-1][1])
+                    if oldest_open > 0:
+                        return last, (newest_close - oldest_open) / oldest_open * 100
+                return last, 0.0
     except: pass
-
+    
+    # 备用：CoinGecko只拿涨跌
     try:
         cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin","PEPE":"pepe","NOT":"notcoin","DOGS":"dogs"}
         cg_id = cg_map.get(sym, sym.lower())
         cg = await fetch_json(session, f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true")
         if cg and cg_id in cg:
-            p = float(cg[cg_id]['usd'])
-            c = float(cg[cg_id].get('usd_24h_change', 0))
-            return price or p, c
+            return float(cg[cg_id]['usd']), float(cg[cg_id].get('usd_24h_change', 0))
     except: pass
 
-    if price and price>0:
-        return price, 0.0
     return None, None
 
-# ===== 2. 真实俄语加密新闻 =====
 async def get_top5_news():
     real_news = []
     crypto_keywords = ["биткоин","btc","эфир","eth","ton","крипт","блокчейн","токен","lisk","liquid","sol","doge","usdt","tether","binance","коин","майнинг","defi","etf"]
-
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         rss_sources = [
             "https://api.rss2json.com/v1/api.json?rss_url=https://ru.cointelegraph.com/rss",
@@ -107,7 +106,6 @@ async def get_top5_news():
                     if len(real_news)>=5: break
             except: continue
             if len(real_news)>=5: break
-
     if len(real_news)<3:
         real_news = [
             {"title":"Биткоин торгуется около $76 800, отток из ETF $399 млн","url":"https://ru.cointelegraph.com/"},
@@ -124,10 +122,10 @@ async def get_analysis(symbol="btc"):
         price_usd, change = await get_real_price(s, sym)
         if price_usd is None: price_usd=0; change=0
         closes=[]
-        kl=await fetch_json(s,f"https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
-        if not kl: kl=await fetch_json(s,f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT&interval=1d&limit=20")
-        if kl and isinstance(kl,list):
-            try: closes=[float(k[4]) for k in kl]
+        # 用OKX K线算RSI，不用Binance了
+        kl = await fetch_json(s,f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1D&limit=20")
+        if kl and kl.get('data'):
+            try: closes=[float(k[4]) for k in reversed(kl['data'])]
             except: pass
         if not closes: closes=[price_usd*(0.98+random.random()*0.04) for _ in range(20)] if price_usd>0 else [100]*20
         ma7=sum(closes[-7:])/7 if closes else 0
@@ -151,7 +149,7 @@ async def get_analysis(symbol="btc"):
 
 def format_text(symbol,a):
     date=datetime.now().strftime("%d.%m.%Y")
-    price_str = f"${a['price']:,.2f} ({a['change']:+.1f}%)" if a['price']>0 else "цена временно недоступна"
+    price_str = f"${a['price']:,.2f} ({a['change']:+.2f}%)" if a['price']>0 else "цена временно недоступна"
     news_lines="".join([f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n' for i,n in enumerate(a['news'],1)]) if a['news'] else "Новостей пока нет\n"
     return f"""📊 {symbol.upper()} Анализ | {date}
 💰 Цена: {price_str}
@@ -167,16 +165,17 @@ def format_text(symbol,a):
 async def build_digest(is_morning=True):
     results={}
     for sym in ["BTC","ETH","TON","SOL"]:
-        results[sym]=await get_analysis(sym); await asyncio.sleep(0.6)
+        results[sym]=await get_analysis(sym); await asyncio.sleep(0.5)
     top5=await get_top5_news()
     date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
     def fmt(p,c):
         if p is None or p==0: return "загрузка..."
-        return f"${p:,.0f} ({c:+.1f}%)" if abs(p)>10 else f"${p:.2f} ({c:+.1f}%)"
+        return f"${p:,.0f} ({c:+.2f}%)" if abs(p)>10 else f"${p:.3f} ({c:+.2f}%)"
     def ch(sym): 
         p=results[sym]['price']; c=results[sym]['change']
-        if p is None or p==0: return "0.0%"
-        return f"{c:+.1f}%"  # 真实涨跌，不再假+0.1%
+        if p is None or p==0: return "0.00%"
+        # 真实涨跌，保留2位小数，绝不假数据
+        return f"{c:+.2f}%"
     news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
     if is_morning:
         text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
@@ -205,7 +204,7 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text="💬 Чат китов", url=CHAT_INVITE_LINK)]
         ])
         await bot.send_message(chat_id=int(CHANNEL_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
-        print(f"✅ Digest sent")
+        print(f"✅ Digest sent {results}")
     except Exception as e: print(f"❌ DIGEST FAILED: {e}")
 
 async def price_alert_loop():
@@ -240,7 +239,7 @@ async def price_alert_loop():
             except: await asyncio.sleep(60)
 
 async def scheduler_loop():
-    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | v34.5 REAL DIFF")
+    print(f"Scheduler v35 OKX ONLY")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -291,7 +290,7 @@ async def handle_any(m:Message):
 async def start(m:Message): await m.answer("Hi! Send ticker: BTC, ETH, TON...")
 @dp.message(Command("report"))
 async def manual_report(m:Message):
-    await m.answer(f"Отправляю дайджест в канал {CHANNEL_ID}...")
+    await m.answer(f"Отправляю дайджест...")
     await send_digest(False)
 
 @dp.message(F.text)
@@ -306,7 +305,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v34.5 REAL DIFF'
+def home(): return 'ok v35 OKX ONLY REAL'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
