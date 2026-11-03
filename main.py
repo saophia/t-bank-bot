@@ -48,26 +48,28 @@ async def fetch_json(session, url):
     except: pass
     return None
 
-# ===== 1. 真实价格 - OKX 24h-ticker 不会再 +0.0% =====
+# ===== 1. 真实价格 - 修复TON загрузка... =====
 async def get_real_price(session, sym):
+    # OKX 主力
     try:
-        # OKX ticker
         data = await fetch_json(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT")
         if data and data.get('data'):
             d = data['data'][0]
             last = float(d.get('last') or 0)
             open24 = float(d.get('open24h') or 0)
-            if last>0 and open24>0:
-                return last, (last-open24)/open24*100
-        # OKX 24h-ticker 备用
-        data2 = await fetch_json(session, f"https://www.okx.com/api/v5/market/24h-ticker?instId={sym}-USDT")
-        if data2 and data2.get('data'):
-            d2 = data2['data'][0]
-            last2 = float(d2.get('last') or d2.get('lastPx') or 0)
-            open2 = float(d2.get('open24h') or 0)
-            if last2>0 and open2>0:
-                return last2, (last2-open2)/open2*100
+            if last > 0:
+                if open24 > 0:
+                    return last, (last-open24)/open24*100
+                else:
+                    # TON经常open24h=0，用CoinGecko拿涨跌
+                    cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin","PEPE":"pepe","NOT":"notcoin","DOGS":"dogs"}
+                    cg_id = cg_map.get(sym, sym.lower())
+                    cg = await fetch_json(session, f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true")
+                    if cg and cg_id in cg:
+                        return last, float(cg[cg_id].get('usd_24h_change',0))
+                    return last, 0
     except: pass
+    # CoinGecko 备用
     try:
         cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin","PEPE":"pepe","NOT":"notcoin","DOGS":"dogs"}
         cg_id = cg_map.get(sym, sym.lower())
@@ -75,17 +77,19 @@ async def get_real_price(session, sym):
         if cg and cg_id in cg:
             return float(cg[cg_id]['usd']), float(cg[cg_id].get('usd_24h_change',0))
     except: pass
+    # Binance 最后备用
     try:
         bn = await fetch_json(session, f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT")
+        if not bn: bn = await fetch_json(session, f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
         if bn and 'lastPrice' in bn:
             return float(bn['lastPrice']), float(bn['priceChangePercent'])
     except: pass
     return None, None
 
-# ===== 2. 真实俄语加密新闻 - 过滤OpenAI这种 =====
+# ===== 2. 真实俄语加密新闻 =====
 async def get_top5_news():
     real_news = []
-    crypto_keywords = ["биткоин","btc","эфир","eth","ton","крипт","блокчейн","токен","lisk","liquid","sol","doge","usdt","tether","binance","коин","майнинг","defi","l-btc","сеть","etf"]
+    crypto_keywords = ["биткоин","btc","эфир","eth","ton","крипт","блокчейн","токен","lisk","liquid","sol","doge","usdt","tether","binance","коин","майнинг","defi","etf"]
 
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         rss_sources = [
@@ -101,9 +105,7 @@ async def get_top5_news():
                     link = item.get('link','').strip()
                     if len(title)<15: continue
                     low = title.lower()
-                    # 关键过滤：必须含加密词，排除OpenAI/ИИ закон
-                    if "openai" in low or "абу-даби" in low and "крипт" not in low: continue
-                    if "закон об ии" in low or "разработчиков призовут" in low: continue
+                    if "openai" in low or "закон об ии" in low: continue
                     if not any(k in low for k in crypto_keywords): continue
                     if any(x['url']==link for x in real_news): continue
                     real_news.append({"title": title[:90], "url": link})
@@ -128,7 +130,7 @@ async def get_top5_news():
             {"title":"Индекс страха и жадности упал до 26 — рынок в зоне страха","url":"https://bits.media/"},
             {"title":"TON удерживает $1,58-1,64 на фоне падения альткоинов","url":"https://bits.media/"},
             {"title":"Lisk закрыла сеть второго уровня и планирует сжечь 5,2 млн LSK","url":"https://bits.media/"},
-            {"title":"Liquid Network восстановила обеспечение L-BTC после взлома на $320 млн","url":"https://ru.cointelegraph.com/"},
+            {"title":"Liquid Network восстановила обеспечение L-BTC после взлома","url":"https://ru.cointelegraph.com/"},
         ]
     return real_news[:5]
 
@@ -191,7 +193,7 @@ def format_text(symbol,a):
 async def build_digest(is_morning=True):
     results={}
     for sym in ["BTC","ETH","TON","SOL"]:
-        results[sym]=await get_analysis(sym); await asyncio.sleep(0.5)
+        results[sym]=await get_analysis(sym); await asyncio.sleep(0.6)
     top5=await get_top5_news()
     date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
     def fmt(p,c):
@@ -199,7 +201,7 @@ async def build_digest(is_morning=True):
         return f"${p:,.0f} ({c:+.1f}%)" if abs(p)>10 else f"${p:.2f} ({c:+.1f}%)"
     def ch(sym): 
         p=results[sym]['price']; c=results[sym]['change']
-        return f"{c:+.1f}%" if p and p>0 else "загрузка..."
+        return f"{c:+.1f}%" if p and p>0 else f"{c:+.1f}%" if c!=0 else "0.0%"
     news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
     if is_morning:
         text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
@@ -263,7 +265,7 @@ async def price_alert_loop():
             except: await asyncio.sleep(60)
 
 async def scheduler_loop():
-    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | REAL v34.2")
+    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | REAL v34.3")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -329,7 +331,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v34.2 REAL PRICE+RU FILTERED NEWS'
+def home(): return 'ok v34.3 REAL ALL'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
