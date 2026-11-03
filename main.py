@@ -8,7 +8,8 @@ from flask import Flask
 import threading
 
 TOKEN = os.getenv("BOT_TOKEN")
-REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1003734717383"
+REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1003734717383"  # 群：预警
+CHANNEL_ID = os.getenv("CHANNEL_ID") or "-1004496994086"         # 频道：早晚报 <- 新增
 CHAT_INVITE_LINK = os.getenv("CHAT_INVITE_LINK") or "https://t.me/+QCwJQgsg9EliY2Qx"
 
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
@@ -94,7 +95,6 @@ async def get_analysis(symbol="btc"):
             try: fg_val=int(fg['data'][0]['value']); fg_text=fg['data'][0]['value_classification']
             except: pass
 
-        # === 核心修复：查币新闻永远有3条 ===
         news_with_links=[]
         news=await fetch_json(s,f"https://min-api.cryptocompare.com/data/v2/news/?categories={sym}&lang=EN")
         if news and news.get('Data'):
@@ -102,7 +102,6 @@ async def get_analysis(symbol="btc"):
                 t=n['title'][:77]+"..." if len(n['title'])>80 else n['title']
                 news_with_links.append({"title":t,"url":n["url"]})
         
-        # 强制兜底，不管什么币
         if len(news_with_links) < 3:
             fallback=[
                 {"title":f"{sym} киты накапливают, отток с бирж растет","url":"https://cointelegraph.com"},
@@ -127,7 +126,6 @@ async def get_analysis(symbol="btc"):
 
 def format_text(symbol,a):
     date=datetime.now().strftime("%d.%m.%Y")
-    # 保证news一定有
     if not a.get('news'): a['news'] = [{"title":"Киты накапливают","url":"https://cointelegraph.com"}]*3
     news_lines="".join([f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n' for i,n in enumerate(a['news'],1)])
     return f"""📊 {symbol.upper()} Анализ | {date}
@@ -174,7 +172,9 @@ async def send_digest(is_morning=True):
             [InlineKeyboardButton(text=f"BTC ${results['BTC']['price']:,.0f} - разбор", url=f"https://t.me/{me.username}?start=analyze")],
             [InlineKeyboardButton(text="💬 Чат китов", url=CHAT_INVITE_LINK)]
         ])
-        await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
+        # 关键修改：发到频道，不再是群
+        await bot.send_message(chat_id=int(CHANNEL_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
+        print(f"✅ Digest sent to CHANNEL {CHANNEL_ID}")
     except Exception as e: print(f"❌ DIGEST FAILED: {e}")
 
 async def price_alert_loop():
@@ -209,7 +209,7 @@ async def price_alert_loop():
             except: await asyncio.sleep(60)
 
 async def scheduler_loop():
-    print("Scheduler 07:00 and 19:00 MSK AUTO NEWS v33.5")
+    print(f"Scheduler 07:00 and 19:00 MSK -> CHANNEL {CHANNEL_ID} | Alerts -> GROUP {REPORT_CHAT_ID}")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -260,7 +260,7 @@ async def handle_any(m:Message):
 async def start(m:Message): await m.answer("Hi! Send ticker: BTC, ETH, TON...")
 @dp.message(Command("report"))
 async def manual_report(m:Message):
-    await m.answer("Отправляю дайджест в канал...")
+    await m.answer(f"Отправляю дайджест в канал {CHANNEL_ID}...")
     await send_digest(False)
 
 @dp.message(F.text)
@@ -275,7 +275,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v33.5 FIXED NEWS'
+def home(): return 'ok v33.6 DUAL ID'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
