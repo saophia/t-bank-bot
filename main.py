@@ -15,11 +15,9 @@ CHAT_INVITE_LINK = os.getenv("CHAT_INVITE_LINK") or "https://t.me/+QCwJQgsg9EliY
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-CACHE = {}; PRICE_HISTORY = {}; LAST_ALERT = {}; CACHE_TTL = 300
+CACHE = {}; CACHE_TTL = 300
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 LAST_REPORTS = {"morning": None, "evening": None}
-ALERT_COOLDOWN = 3600
-WATCH_LIST = ["BTC","ETH","TON","SOL","DOGE","PEPE","NOT","DOGS"]
 
 WELCOME_TEXT = """🐋 T-BANK | Чат Китов - Точные Сигналы
 📈 Что ты получаешь каждый день:
@@ -241,39 +239,8 @@ async def send_digest(is_morning=True):
         print(f"✅ Digest sent {results}")
     except Exception as e: print(f"❌ DIGEST FAILED: {e}")
 
-async def price_alert_loop():
-    await asyncio.sleep(10)
-    async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as session:
-        while True:
-            try:
-                for sym in WATCH_LIST:
-                    price, _ = await get_real_price(session, sym)
-                    if not price: continue
-                    now=time.time()
-                    if sym not in PRICE_HISTORY: PRICE_HISTORY[sym]=[]
-                    PRICE_HISTORY[sym].append((now,price))
-                    PRICE_HISTORY[sym]=[(t,p) for t,p in PRICE_HISTORY[sym] if now-t<=3600]
-                    if len(PRICE_HISTORY[sym])<2: continue
-                    price_5m=next((p for t,p in reversed(PRICE_HISTORY[sym]) if now-t>=300),None)
-                    price_1h=PRICE_HISTORY[sym][0][1]
-                    if not price_5m: continue
-                    change_5m=(price-price_5m)/price_5m*100; change_1h=(price-price_1h)/price_1h*100
-                    should=None
-                    if abs(change_5m)>=2.5: should=f"⚡️ {sym} PUMP" if change_5m>0 else f"⚡️ {sym} DUMP"
-                    elif abs(change_1h)>=4.0: should=f"🚨 {sym} UP +{change_1h:.1f}%" if change_1h>0 else f"🚨 {sym} DOWN {change_1h:.1f}%"
-                    if should:
-                        if sym in LAST_ALERT and now-LAST_ALERT[sym]<ALERT_COOLDOWN: continue
-                        LAST_ALERT[sym]=now
-                        me=await bot.get_me()
-                        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{sym} Analysis", url=f"https://t.me/{me.username}?start={sym}")],[InlineKeyboardButton(text="Chat", url=CHAT_INVITE_LINK)]])
-                        txt=f"{should} | {datetime.now(MOSCOW_TZ).strftime('%H:%M')}\n${price:,.4f} {change_5m:+.2f}% 5m"
-                        try: await bot.send_message(chat_id=int(REPORT_CHAT_ID), text=txt, reply_markup=kb)
-                        except: pass
-                await asyncio.sleep(60)
-            except: await asyncio.sleep(60)
-
 async def scheduler_loop():
-    print(f"Scheduler v36 5 sources")
+    print(f"Scheduler v37 - no price alert")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -333,12 +300,11 @@ async def channel_msg(m:Message): await handle_any(m)
 
 async def main():
     asyncio.create_task(scheduler_loop())
-    asyncio.create_task(price_alert_loop())
     await dp.start_polling(bot, allowed_updates=["message","channel_post","chat_member","my_chat_member"])
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v36 5 sources TON FIX'
+def home(): return 'ok v37 - no price alert'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
