@@ -30,6 +30,17 @@ WELCOME_TEXT = """🐋 T-BANK | Чат Китов - Точные Сигналы
 https://t.me/+QCwJQgsg9EliY2Qx
 """
 
+# ===== 新增：进群欢迎语 =====
+WELCOME_GROUP_TEXT = """👋 Добро пожаловать в «Сигналы Китов 🐋»!
+
+📈 Здесь мы каждый день публикуем точные торговые сигналы.
+
+⏳ Сигналы выходят в разное время, когда появляется хорошая точка входа.
+Просто включите уведомления 🔔 и наберитесь терпения.
+
+💰 Ваша задача — только вовремя зайти.
+Удачи нам всем! 🚀"""
+
 def calc_rsi_fixed(prices, period=14):
     if len(prices) < period+1: return 50
     deltas = [prices[i]-prices[i-1] for i in range(1, len(prices))]
@@ -152,7 +163,6 @@ async def get_analysis(symbol="btc"):
     async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
         price_usd, change = await get_real_price(s, sym)
         if price_usd is None: 
-            # 最后兜底，绝不返回None导致загрузка
             fallback = {"BTC":76474,"ETH":2700,"TON":1.62,"SOL":145,"DOGE":0.14}
             price_usd = fallback.get(sym, 0); change = -0.51 if sym=="BTC" else 0.0
         closes=[]
@@ -240,7 +250,7 @@ async def send_digest(is_morning=True):
     except Exception as e: print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
-    print(f"Scheduler v37 - no price alert")
+    print(f"Scheduler v38 - group welcome")
     while True:
         try:
             now_msk=datetime.now(MOSCOW_TZ)
@@ -259,13 +269,25 @@ async def delete_after(msg:Message, delay:int):
 @dp.chat_member()
 async def on_new_channel_subscriber(event: ChatMemberUpdated):
     try:
-        if event.chat.type != "channel": return
-        is_new = event.old_chat_member.status in ["left", "kicked"] and event.new_chat_member.status in ["member", "administrator", "creator", "restricted"]
-        if not is_new: return
-        if event.new_chat_member.user.is_bot: return
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Enter whale chat", url=CHAT_INVITE_LINK)]])
-        msg = await bot.send_message(chat_id=event.chat.id, text=WELCOME_TEXT, reply_markup=kb)
-        asyncio.create_task(delete_after(msg, 600))
+        # ===== 频道：老逻辑不变 =====
+        if event.chat.type == "channel":
+            is_new = event.old_chat_member.status in ["left", "kicked"] and event.new_chat_member.status in ["member", "administrator", "creator", "restricted"]
+            if not is_new: return
+            if event.new_chat_member.user.is_bot: return
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Enter whale chat", url=CHAT_INVITE_LINK)]])
+            msg = await bot.send_message(chat_id=event.chat.id, text=WELCOME_TEXT, reply_markup=kb)
+            asyncio.create_task(delete_after(msg, 600))
+            return
+
+        # ===== 群组：新增逻辑 =====
+        if event.chat.type in ["group", "supergroup"]:
+            is_new = event.old_chat_member.status in ["left", "kicked"] and event.new_chat_member.status in ["member", "administrator", "creator", "restricted"]
+            if not is_new: return
+            if event.new_chat_member.user.is_bot: return
+            msg = await bot.send_message(chat_id=event.chat.id, text=WELCOME_GROUP_TEXT)
+            # 5分钟 = 300秒后自动删除
+            asyncio.create_task(delete_after(msg, 300))
+            return
     except Exception as e: print(f"WELCOME FAILED: {e}")
 
 async def handle_any(m:Message):
@@ -304,7 +326,7 @@ async def main():
 
 app=Flask(__name__)
 @app.route('/')
-def home(): return 'ok v37 - no price alert'
+def home(): return 'ok v38 - group welcome'
 
 def run_flask():
     port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
