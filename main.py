@@ -1,129 +1,27 @@
-import os, asyncio, aiohttp, random, time
+import os, asyncio, aiohttp
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
+from aiogram import Bot, Dispatcher
 from flask import Flask
 import threading
 
 TOKEN = os.getenv("BOT_TOKEN")
-REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID") or "-1003734717383"
 CHANNEL_ID = os.getenv("CHANNEL_ID") or "-1004496994086"
-CHAT_INVITE_LINK = os.getenv("CHAT_INVITE_LINK") or "https://t.me/+QCwJQgsg9EliY2Qx"
 
 if not TOKEN: raise ValueError("BOT_TOKEN not set!")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-CACHE = {}; CACHE_TTL = 300
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 LAST_REPORTS = {"morning": None, "evening": None}
-
-WELCOME_TEXT = """🐋 T-BANK | Чат Китов - Точные Сигналы
-📈 Что ты получаешь каждый день:
-💎 3-5 точных сигнала - вход, стоп, тейк
-💰 Прогноз по BTC, ETH, TON и топ-монетам
-🔥 Свежие новости + куда льют киты
-📊 Волновой анализ и разбор твоих сделок
-Тут не болтают. Тут зарабатывают.
-👇 Жми и заходи в чат китов:
-https://t.me/+QCwJQgsg9EliY2Qx
-"""
-
-# ===== 新增：进群欢迎语 =====
-WELCOME_GROUP_TEXT = """👋 Добро пожаловать в «Сигналы Китов 🐋»!
-
-📈 Здесь мы каждый день публикуем точные торговые сигналы.
-
-⏳ Сигналы выходят в разное время, когда появляется хорошая точка входа.
-Просто включите уведомления 🔔 и наберитесь терпения.
-
-💰 Ваша задача — только вовремя зайти.
-Удачи нам всем! 🚀"""
-
-def calc_rsi_fixed(prices, period=14):
-    if len(prices) < period+1: return 50
-    deltas = [prices[i]-prices[i-1] for i in range(1, len(prices))]
-    gains = [d if d>0 else 0 for d in deltas[-period:]]
-    losses = [-d if d<0 else 0 for d in deltas[-period:]]
-    ag = sum(gains)/period or 0.01; al = sum(losses)/period or 0.01
-    return 100 - (100/(1+ag/al if al!=0 else 1))
 
 async def fetch_json(session, url):
     try:
         async with session.get(url, timeout=10) as r:
-            if r.status==200: return await r.json()
+            if r.status == 200:
+                return await r.json()
     except Exception as e:
         print(f"fetch fail {url} {e}")
     return None
-
-# ===== 修复 TON загрузка... - 5个源 =====
-async def get_real_price(session, sym):
-    print(f"GET PRICE {sym}")
-    # 1. OKX 现货
-    try:
-        data = await fetch_json(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT")
-        if data and data.get('data'):
-            d = data['data'][0]
-            last = float(d.get('last') or 0)
-            open24 = float(d.get('open24h') or 0)
-            print(f"OKX spot {sym} last={last} open={open24}")
-            if last > 0 and open24 > 0:
-                return last, (last-open24)/open24*100
-            if last > 0:
-                # 用K线算
-                candles = await fetch_json(session, f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1H&limit=24")
-                if candles and candles.get('data') and len(candles['data'])>=2:
-                    newest = float(candles['data'][0][4]); oldest = float(candles['data'][-1][1])
-                    if oldest>0: return last, (newest-oldest)/oldest*100
-                return last, 0.0
-    except Exception as e: print(f"OKX spot fail {sym} {e}")
-
-    # 2. OKX 合约 - TON现货挂了合约经常是好的
-    try:
-        data = await fetch_json(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT-SWAP")
-        if data and data.get('data'):
-            d = data['data'][0]
-            last = float(d.get('last') or 0)
-            open24 = float(d.get('open24h') or 0)
-            print(f"OKX swap {sym} last={last} open={open24}")
-            if last>0 and open24>0:
-                return last, (last-open24)/open24*100
-            if last>0: return last, 0.0
-    except Exception as e: print(f"OKX swap fail {sym} {e}")
-
-    # 3. Bybit - 对TON最稳
-    try:
-        data = await fetch_json(session, f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={sym}USDT")
-        if data and data.get('result') and data['result'].get('list'):
-            d = data['result']['list'][0]
-            last = float(d.get('lastPrice') or 0)
-            change = float(d.get('price24hPcnt') or 0)*100
-            print(f"Bybit {sym} last={last} change={change}")
-            if last>0: return last, change
-    except Exception as e: print(f"Bybit fail {sym} {e}")
-
-    # 4. CoinGecko
-    try:
-        cg_map = {"BTC":"bitcoin","ETH":"ethereum","TON":"the-open-network","SOL":"solana","DOGE":"dogecoin","PEPE":"pepe","NOT":"notcoin","DOGS":"dogs"}
-        cg_id = cg_map.get(sym, sym.lower())
-        cg = await fetch_json(session, f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true")
-        if cg and cg_id in cg:
-            p=float(cg[cg_id]['usd']); c=float(cg[cg_id].get('usd_24h_change',0))
-            print(f"CG {sym} {p} {c}")
-            if p>0: return p, c
-    except Exception as e: print(f"CG fail {sym} {e}")
-
-    # 5. Binance Vision - 备用
-    try:
-        bn = await fetch_json(session, f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
-        if bn and 'lastPrice' in bn:
-            print(f"Binance vision {sym} {bn}")
-            return float(bn['lastPrice']), float(bn['priceChangePercent'])
-    except Exception as e: print(f"Binance vision fail {sym} {e}")
-
-    print(f"ALL FAIL {sym}")
-    return None, None
 
 async def get_top5_news():
     real_news = []
@@ -138,199 +36,121 @@ async def get_top5_news():
                 data = await fetch_json(s, rss_url)
                 if not data or not data.get('items'): continue
                 for item in data['items']:
-                    title = item.get('title','').strip(); link = item.get('link','').strip()
-                    if len(title)<15: continue
+                    title = item.get('title','').strip()
+                    link = item.get('link','').strip()
+                    if len(title) < 15: continue
                     low = title.lower()
                     if "openai" in low or "закон об ии" in low: continue
                     if not any(k in low for k in crypto_keywords): continue
-                    if any(x['url']==link for x in real_news): continue
+                    if any(x['url'] == link for x in real_news): continue
                     real_news.append({"title": title[:90], "url": link})
-                    if len(real_news)>=5: break
+                    if len(real_news) >= 5: break
             except: continue
-            if len(real_news)>=5: break
-    if len(real_news)<3:
-        real_news = [
-            {"title":"Биткоин торгуется около $76 800, отток из ETF $399 млн","url":"https://ru.cointelegraph.com/"},
-            {"title":"Индекс страха и жадности упал до 26 — рынок в зоне страха","url":"https://bits.media/"},
-            {"title":"TON удерживает $1,58-1,64 на фоне падения альткоинов","url":"https://bits.media/"},
-            {"title":"Lisk закрыла сеть второго уровня и планирует сжечь 5,2 млн LSK","url":"https://bits.media/"},
-            {"title":"Liquid Network восстановила обеспечение L-BTC после взлома","url":"https://ru.cointelegraph.com/"},
-        ]
+            if len(real_news) >= 5: break
     return real_news[:5]
 
-async def get_analysis(symbol="btc"):
-    sym=symbol.upper()
-    async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
-        price_usd, change = await get_real_price(s, sym)
-        if price_usd is None: 
-            fallback = {"BTC":76474,"ETH":2700,"TON":1.62,"SOL":145,"DOGE":0.14}
-            price_usd = fallback.get(sym, 0); change = -0.51 if sym=="BTC" else 0.0
-        closes=[]
-        kl = await fetch_json(s,f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1D&limit=20")
-        if kl and kl.get('data'):
-            try: closes=[float(k[4]) for k in reversed(kl['data'])]
-            except: pass
-        if not closes: closes=[price_usd*(0.98+random.random()*0.04) for _ in range(20)] if price_usd>0 else [100]*20
-        ma7=sum(closes[-7:])/7 if closes else 0
-        ma7_text=f"MA7 ниже цены (медвежий)" if price_usd and price_usd < ma7 else f"MA7 выше цены (бычий)"
-        rsi=calc_rsi_fixed(closes)
-        rsi_text=f"{rsi:.0f} (перепродан)" if rsi<=38 else f"{rsi:.0f} (перекуплен)" if rsi>=65 else f"{rsi:.0f} (нейтрально)"
-        fg_val,fg_text=26,"Fear"
-        fg=await fetch_json(s,"https://api.alternative.me/fng/?limit=1")
-        if fg and 'data' in fg:
-            try: fg_val=int(fg['data'][0]['value']); fg_text=fg['data'][0]['value_classification']
-            except: pass
-        top = await get_top5_news()
-        usdt_rub=83.9
-        rub=await fetch_json(s,"https://www.okx.com/api/v5/market/ticker?instId=USDT-RUB")
-        if rub and rub.get('data'):
-            try: usdt_rub=float(rub['data'][0]['last'])
-            except: pass
-        conclusion="Фундаментально позитив, технически перепродан. Возможен отскок." if rsi<=38 else "Фундаментально позитив, технически перекуплен. Возможен откат." if rsi>=68 else "Нейтрально. Боковик."
-        if rsi>38 and rsi<68: conclusion="Фундаментально позитив, технически нейтрально."
-        return {"price":price_usd,"change":change,"ma7_text":ma7_text,"rsi_text":rsi_text,"fg_val":fg_val,"fg_text":fg_text,"news":top[:3],"rub":usdt_rub,"conclusion":conclusion}
-
-def format_text(symbol,a):
-    date=datetime.now().strftime("%d.%m.%Y")
-    price_str = f"${a['price']:,.2f} ({a['change']:+.2f}%)" if a['price']>0 else "цена временно недоступна"
-    news_lines="".join([f'{i}. <a href="{n["url"]}">{n["title"]}</a>\n' for i,n in enumerate(a['news'],1)]) if a['news'] else "Новостей пока нет\n"
-    return f"""📊 {symbol.upper()} Анализ | {date}
-💰 Цена: {price_str}
-📈 Техника: {a['ma7_text']}, RSI {a['rsi_text']}
-🧠 Настроения: Индекс {a['fg_val']} ({a['fg_text']})
-📋 Что двигает цену сегодня:
-{news_lines}
-⚠️ Вывод: {a['conclusion']}
-Не фин. совет
-💱 Курс T-Bank USDT: {a['rub']:.1f} RUB 👉 @tbank_usdt_bot
-#{symbol.upper()}"""
+async def get_price(session, sym):
+    try:
+        data = await fetch_json(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT")
+        if data and data.get('data'):
+            d = data['data'][0]
+            last = float(d.get('last') or 0)
+            open24 = float(d.get('open24h') or 0)
+            if last > 0 and open24 > 0:
+                return last, (last-open24)/open24*100
+    except: pass
+    try:
+        data = await fetch_json(session, f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={sym}USDT")
+        if data and data['result'].get('list'):
+            d = data['result']['list'][0]
+            last = float(d.get('lastPrice') or 0)
+            change = float(d.get('price24hPcnt') or 0)*100
+            if last > 0: return last, change
+    except: pass
+    return None, None
 
 async def build_digest(is_morning=True):
-    results={}
-    for sym in ["BTC","ETH","TON","SOL"]:
-        results[sym]=await get_analysis(sym); await asyncio.sleep(0.5)
-    top5=await get_top5_news()
-    date=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
-    def fmt(p,c):
-        if p is None or p==0: return "загрузка..."
-        return f"${p:,.0f} ({c:+.2f}%)" if abs(p)>10 else f"${p:.3f} ({c:+.2f}%)"
-    def ch(sym): 
-        p=results[sym]['price']; c=results[sym]['change']
-        if p is None or p==0: return "0.00%"
-        return f"{c:+.2f}%"
-    news_block="".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i,n in enumerate(top5,1)])
+    async with aiohttp.ClientSession(headers={"User-Agent":"Mozilla/5.0"}) as s:
+        btc_price, btc_change = await get_price(s, "BTC")
+        ton_price, ton_change = await get_price(s, "TON")
+        eth_price, eth_change = await get_price(s, "ETH")
+
+        fg_val, fg_text = 26, "Fear"
+        fg = await fetch_json(s, "https://api.alternative.me/fng/?limit=1")
+        if fg and 'data' in fg:
+            try:
+                fg_val = int(fg['data'][0]['value'])
+                fg_text = fg['data'][0]['value_classification']
+            except: pass
+
+    top5 = await get_top5_news()
+    date = datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
+
+    def fmt(p, c):
+        if p is None or p == 0: return "загрузка..."
+        return f"${p:,.0f} ({c:+.2f}%)" if abs(p) > 10 else f"${p:.3f} ({c:+.2f}%)"
+
+    def ch(c):
+        return f"{c:+.2f}%" if c is not None else "0.00%"
+
+    news_block = "".join([f'{i}. <a href="{n["url"]}">{n["title"][:85]}</a>\n' for i, n in enumerate(top5, 1)])
+    if not news_block:
+        news_block = "Новостей пока нет\n"
+
     if is_morning:
-        text=f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
-💰 Рынок: BTC {fmt(results['BTC']['price'], results['BTC']['change'])} | TON {fmt(results['TON']['price'], results['TON']['change'])}
-🧠 Страх: {results['BTC']['fg_val']} ({results['BTC']['fg_text']})
+        text = f"""☀️ <b>УТРЕННИЙ ДАЙДЖЕСТ | {date}</b>
+💰 Рынок: BTC {fmt(btc_price, btc_change)} | TON {fmt(ton_price, ton_change)}
+🧠 Страх: {fg_val} ({fg_text})
 🔥 <b>ТОП-5 новостей:</b>
 {news_block}
-⚡️ Вывод: {results['BTC']['conclusion']}
 #утро #BTC #TON"""
     else:
-        text=f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>
-За день: BTC {ch('BTC')} | ETH {ch('ETH')} | TON {ch('TON')}
-🧠 Индекс: {results['BTC']['fg_val']}
+        text = f"""🌙 <b>ВЕЧЕРНИЙ ИТОГ | {date}</b>
+За день: BTC {ch(btc_change)} | ETH {ch(eth_change)} | TON {ch(ton_change)}
+🧠 Индекс: {fg_val}
 📌 <b>Что случилось сегодня:</b>
 {news_block}
 Завтра в 7:00 утренний дайджест.
 #вечер #TON"""
-    return text, top5, results
+    return text
 
 async def send_digest(is_morning=True):
     try:
-        me=await bot.get_me()
-        text, top5, results = await build_digest(is_morning)
-        kb=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"BTC ${results['BTC']['price']:,.0f} - разбор" if results['BTC']['price']>0 else "BTC - разбор", url=f"https://t.me/{me.username}?start=analyze")],
-            [InlineKeyboardButton(text="💬 Чат китов", url=CHAT_INVITE_LINK)]
-        ])
-        await bot.send_message(chat_id=int(CHANNEL_ID), text=text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
-        print(f"✅ Digest sent {results}")
-    except Exception as e: print(f"❌ DIGEST FAILED: {e}")
+        text = await build_digest(is_morning)
+        await bot.send_message(chat_id=int(CHANNEL_ID), text=text, parse_mode="HTML", disable_web_page_preview=True)
+        print(f"✅ Digest sent morning={is_morning}")
+    except Exception as e:
+        print(f"❌ DIGEST FAILED: {e}")
 
 async def scheduler_loop():
-    print(f"Scheduler v38 - group welcome")
+    print("Scheduler - only morning/evening digest")
     while True:
         try:
-            now_msk=datetime.now(MOSCOW_TZ)
-            if now_msk.hour==7 and 0 <= now_msk.minute < 2:
-                if LAST_REPORTS["morning"]!=now_msk.date(): await send_digest(True); LAST_REPORTS["morning"]=now_msk.date()
-            if now_msk.hour==19 and 0 <= now_msk.minute < 2:
-                if LAST_REPORTS["evening"]!=now_msk.date(): await send_digest(False); LAST_REPORTS["evening"]=now_msk.date()
+            now_msk = datetime.now(MOSCOW_TZ)
+            if now_msk.hour == 7 and 0 <= now_msk.minute < 2:
+                if LAST_REPORTS["morning"] != now_msk.date():
+                    await send_digest(True)
+                    LAST_REPORTS["morning"] = now_msk.date()
+            if now_msk.hour == 19 and 0 <= now_msk.minute < 2:
+                if LAST_REPORTS["evening"] != now_msk.date():
+                    await send_digest(False)
+                    LAST_REPORTS["evening"] = now_msk.date()
             await asyncio.sleep(30)
-        except: await asyncio.sleep(60)
-
-async def delete_after(msg:Message, delay:int):
-    await asyncio.sleep(delay)
-    try: await msg.delete()
-    except: pass
-
-@dp.chat_member()
-async def on_new_channel_subscriber(event: ChatMemberUpdated):
-    try:
-        # ===== 频道：老逻辑不变 =====
-        if event.chat.type == "channel":
-            is_new = event.old_chat_member.status in ["left", "kicked"] and event.new_chat_member.status in ["member", "administrator", "creator", "restricted"]
-            if not is_new: return
-            if event.new_chat_member.user.is_bot: return
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Enter whale chat", url=CHAT_INVITE_LINK)]])
-            msg = await bot.send_message(chat_id=event.chat.id, text=WELCOME_TEXT, reply_markup=kb)
-            asyncio.create_task(delete_after(msg, 600))
-            return
-
-        # ===== 群组：新增逻辑 =====
-        if event.chat.type in ["group", "supergroup"]:
-            is_new = event.old_chat_member.status in ["left", "kicked"] and event.new_chat_member.status in ["member", "administrator", "creator", "restricted"]
-            if not is_new: return
-            if event.new_chat_member.user.is_bot: return
-            msg = await bot.send_message(chat_id=event.chat.id, text=WELCOME_GROUP_TEXT)
-            # 5分钟 = 300秒后自动删除
-            asyncio.create_task(delete_after(msg, 300))
-            return
-    except Exception as e: print(f"WELCOME FAILED: {e}")
-
-async def handle_any(m:Message):
-    try:
-        if m.from_user and m.from_user.is_bot: return
-        txt_full=m.text or ""
-        if txt_full.startswith("/"): return
-        sym=''.join(filter(str.isalnum,txt_full.lower().strip().split()[0]))[:10]
-        if len(sym)<2: return
-        key=(m.chat.id, sym.lower()); now=time.time()
-        if key in CACHE:
-            ts,fid=CACHE[key]
-            if now-ts<CACHE_TTL:
-                warn=await m.answer(f"⚠️ {sym.upper()} recently", reply_to_message_id=fid)
-                asyncio.create_task(delete_after(warn,30)); asyncio.create_task(delete_after(m,30)); return
-        a=await get_analysis(sym); text=format_text(sym,a)
-        sent=await m.answer(text,parse_mode="HTML",disable_web_page_preview=True)
-        CACHE[key]=(now, sent.message_id)
-    except Exception as e: print(e)
-
-@dp.message(Command("start"))
-async def start(m:Message): await m.answer("Hi! Send ticker: BTC, ETH, TON...")
-@dp.message(Command("report"))
-async def manual_report(m:Message):
-    await m.answer(f"Отправляю дайджест...")
-    await send_digest(False)
-
-@dp.message(F.text)
-async def private_msg(m:Message): await handle_any(m)
-@dp.channel_post(F.text)
-async def channel_msg(m:Message): await handle_any(m)
+        except:
+            await asyncio.sleep(60)
 
 async def main():
     asyncio.create_task(scheduler_loop())
-    await dp.start_polling(bot, allowed_updates=["message","channel_post","chat_member","my_chat_member"])
+    await dp.start_polling(bot, allowed_updates=[])
 
-app=Flask(__name__)
+app = Flask(__name__)
 @app.route('/')
-def home(): return 'ok v38 - group welcome'
+def home(): return 'ok - only digest'
 
 def run_flask():
-    port=int(os.environ.get("PORT",10000)); app.run(host='0.0.0.0',port=port)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
-if __name__=="__main__":
-    threading.Thread(target=run_flask,daemon=True).start()
+if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(main())
